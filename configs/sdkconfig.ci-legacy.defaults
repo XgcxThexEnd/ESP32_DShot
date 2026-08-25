@@ -1,0 +1,7 @@
+# Layer after sdkconfig.ci-safe.defaults to compile the bounded legacy migration
+# path at the highest supported global fan-index boundary.
+CONFIG_FAN_COUNT=4
+CONFIG_FAN_INDEX_START=5
+CONFIG_NODE_ID="ci-legacy"
+CONFIG_DSHOT_GPIO="5,7,9,11"
+CONFIG_MQTT_LEGACY_TOPICS=y

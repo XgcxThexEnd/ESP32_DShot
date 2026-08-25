@@ -1,16 +1,33 @@
 idf_component_register(
     SRCS
         "app_main.c"
+        "app_config.c"
+        "command_router.c"
+        "controller_policy.c"
+        "dshot_protocol.c"
         "dshot_esc_encoder.c"
+        "fan_state_store.c"
+        "motor_control.c"
+        "mqtt_manager.c"
+        "ota_manager.c"
+        "scheduler.c"
+        "safety_supervisor.c"
+        "state_publisher.c"
+        "tach_monitor.c"
+        "wifi_manager.c"
     INCLUDE_DIRS
         "."
     REQUIRES
-    esp_driver_rmt
-    esp_driver_gpio
-        esp_wifi
-        esp_netif
-        nvs_flash
-        mqtt
+        app_update
+        esp_driver_gpio
+        esp_driver_pcnt
+        esp_driver_rmt
         esp_event
+        esp_https_ota
+        esp_netif
         esp_timer
+        esp_wifi
+        mbedtls
+        mqtt
+        nvs_flash
 )

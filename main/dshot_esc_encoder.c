@@ -6,24 +6,12 @@
 
 #include "esp_check.h"
 #include "dshot_esc_encoder.h"
+#include "dshot_protocol.h"
 
 static const char *TAG = "dshot_encoder";
 
-/**
- * @brief Type of Dshot ESC frame
- */
-typedef union {
-    struct {
-        uint16_t crc: 4;       /*!< CRC checksum */
-        uint16_t telemetry: 1; /*!< Telemetry request */
-        uint16_t throttle: 11; /*!< Throttle value */
-    };
-    uint16_t val;
-} dshot_esc_frame_t;
-
-#ifndef __cplusplus
-_Static_assert(sizeof(dshot_esc_frame_t) == 0x02, "Invalid size of dshot_esc_frame_t structure");
-#endif
+#define DSHOT_RMT_DURATION_MAX 0x7FFFU
+#define DSHOT_USEC_PER_SEC 1000000U
 
 typedef struct {
     rmt_encoder_t base;
@@ -32,18 +20,6 @@ typedef struct {
     rmt_symbol_word_t dshot_delay_symbol;
     int state;
 } rmt_dshot_esc_encoder_t;
-
-static void make_dshot_frame(dshot_esc_frame_t *frame, uint16_t throttle, bool telemetry)
-{
-    frame->throttle = throttle;
-    frame->telemetry = telemetry;
-    uint16_t val = frame->val;
-    uint8_t crc = ((val ^ (val >> 4) ^ (val >> 8)) & 0xF0) >> 4;;
-    frame->crc = crc;
-    val = frame->val;
-    // change the endian
-    frame->val = ((val & 0xFF) << 8) | ((val & 0xFF00) >> 8);
-}
 
 RMT_ENCODER_FUNC_ATTR
 static size_t rmt_encode_dshot_esc(rmt_encoder_t *encoder, rmt_channel_handle_t channel,
@@ -58,12 +34,15 @@ static size_t rmt_encode_dshot_esc(rmt_encoder_t *encoder, rmt_channel_handle_t 
 
     // convert user data into dshot frame
     dshot_esc_throttle_t *throttle = (dshot_esc_throttle_t *)primary_data;
-    dshot_esc_frame_t frame = {};
-    make_dshot_frame(&frame, throttle->throttle, throttle->telemetry_req);
+    uint8_t frame[2] = {0};
+    // Invalid input fails safe to the all-zero stop frame. Application policy
+    // already constrains values to 0 or 48..2047, but the encoder remains safe
+    // if a caller violates that contract.
+    (void)dshot_protocol_build_frame(throttle->throttle, throttle->telemetry_req, frame);
 
     switch (dshot_encoder->state) {
     case 0: // send the dshot frame
-        encoded_symbols += bytes_encoder->encode(bytes_encoder, channel, &frame, sizeof(frame), &session_state);
+        encoded_symbols += bytes_encoder->encode(bytes_encoder, channel, frame, sizeof(frame), &session_state);
         if (session_state & RMT_ENCODING_COMPLETE) {
             dshot_encoder->state = 1; // switch to next state when current encoding session finished
         }
@@ -113,26 +92,41 @@ esp_err_t rmt_new_dshot_esc_encoder(const dshot_esc_encoder_config_t *config, rm
     esp_err_t ret = ESP_OK;
     rmt_dshot_esc_encoder_t *dshot_encoder = NULL;
     ESP_GOTO_ON_FALSE(config && ret_encoder, ESP_ERR_INVALID_ARG, err, TAG, "invalid argument");
+    *ret_encoder = NULL;
+
+    ESP_GOTO_ON_FALSE(config->resolution > 0 && config->baud_rate > 0 && config->post_delay_us > 0,
+                      ESP_ERR_INVALID_ARG, err, TAG, "timing values must be non-zero");
+
+    const uint64_t period_ticks = (uint64_t)config->resolution / config->baud_rate;
+    const uint64_t delay_ticks = ((uint64_t)config->resolution * config->post_delay_us) / DSHOT_USEC_PER_SEC;
+    ESP_GOTO_ON_FALSE(period_ticks > 0 && delay_ticks >= 2 && delay_ticks <= (2U * DSHOT_RMT_DURATION_MAX),
+                      ESP_ERR_INVALID_ARG, err, TAG, "timing values are outside the RMT range");
+
+    const uint32_t t1h_ticks = ((uint64_t)config->resolution * 7485U) /
+                               ((uint64_t)config->baud_rate * 10000U);
+    const uint32_t t0h_ticks = ((uint64_t)config->resolution * 37425U) /
+                               ((uint64_t)config->baud_rate * 100000U);
+    const uint32_t t1l_ticks = period_ticks - t1h_ticks;
+    const uint32_t t0l_ticks = period_ticks - t0h_ticks;
+    ESP_GOTO_ON_FALSE(t1h_ticks > 0 && t1h_ticks <= DSHOT_RMT_DURATION_MAX &&
+                      t1l_ticks > 0 && t1l_ticks <= DSHOT_RMT_DURATION_MAX &&
+                      t0h_ticks > 0 && t0h_ticks <= DSHOT_RMT_DURATION_MAX &&
+                      t0l_ticks > 0 && t0l_ticks <= DSHOT_RMT_DURATION_MAX,
+                      ESP_ERR_INVALID_ARG, err, TAG, "DShot pulse width is outside the RMT range");
+
     dshot_encoder = rmt_alloc_encoder_mem(sizeof(rmt_dshot_esc_encoder_t));
-    ESP_GOTO_ON_FALSE(dshot_encoder, ESP_ERR_NO_MEM, err, TAG, "no mem for musical score encoder");
+    ESP_GOTO_ON_FALSE(dshot_encoder, ESP_ERR_NO_MEM, err, TAG, "no memory for DShot encoder");
     dshot_encoder->base.encode = rmt_encode_dshot_esc;
     dshot_encoder->base.del = rmt_del_dshot_encoder;
     dshot_encoder->base.reset = rmt_dshot_encoder_reset;
-    uint32_t delay_ticks = config->resolution / 1e6 * config->post_delay_us;
     rmt_symbol_word_t dshot_delay_symbol = {
         .level0 = 0,
-        .duration0 = delay_ticks / 2,
+        .duration0 = (uint32_t)(delay_ticks / 2),
         .level1 = 0,
-        .duration1 = delay_ticks / 2,
+        .duration1 = (uint32_t)(delay_ticks - (delay_ticks / 2)),
     };
     dshot_encoder->dshot_delay_symbol = dshot_delay_symbol;
-    // different dshot protocol have its own timing requirements,
-    float period_ticks = (float)config->resolution / config->baud_rate;
     // 1 and 0 is represented by a 74.850% and 37.425% duty cycle respectively
-    unsigned int t1h_ticks = (unsigned int)(period_ticks * 0.7485);
-    unsigned int t1l_ticks = (unsigned int)(period_ticks - t1h_ticks);
-    unsigned int t0h_ticks = (unsigned int)(period_ticks * 0.37425);
-    unsigned int t0l_ticks = (unsigned int)(period_ticks - t0h_ticks);
     rmt_bytes_encoder_config_t bytes_encoder_config = {
         .bit0 = {
             .level0 = 1,

@@ -1,0 +1,31 @@
+# Layer after sdkconfig.ci-safe.defaults to compile reversible optional paths.
+# The reserved .invalid host cannot be a production update service.
+CONFIG_RESTORE_FAN_STATE=y
+CONFIG_FAN_STATE_SAVE_DEBOUNCE_MS=1500
+CONFIG_SCHEDULE_ENABLED=y
+CONFIG_SCHEDULE_SLOTS=4
+CONFIG_SCHEDULE_SAVE_DEBOUNCE_MS=1000
+CONFIG_OTA_ENABLED=y
+CONFIG_OTA_ALLOWED_URL_PREFIX="https://updates.example.invalid/greenhouse/"
+CONFIG_HOME_ASSISTANT_DISCOVERY_ENABLED=y
+
+# Compile the hardware safety/feedback and communication-failsafe paths using
+# non-conflicting CI-only GPIOs. These pins are not a wiring recommendation.
+CONFIG_MOTOR_INTERLOCK_ENABLED=y
+CONFIG_MOTOR_INTERLOCK_GPIO=4
+CONFIG_TACH_FEEDBACK_ENABLED=y
+CONFIG_TACH_GPIO="6"
+CONFIG_TACH_STALL_STOP_FAN=y
+CONFIG_COMM_LOSS_STOP_AFTER_LEASE=y
+CONFIG_COMMUNICATION_LEASE_MS=60000
+
+# Rollback is reversible build behavior and the application implements the
+# pending-verify health gate. No signing keys or eFuses are involved in CI.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Still intentionally excluded from CI configuration.
+# CONFIG_MQTT_RESTART_ON_TIMEOUT is not set
+# CONFIG_SECURE_BOOT is not set
+# CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT is not set
+# CONFIG_SECURE_FLASH_ENC_ENABLED is not set
+# CONFIG_NVS_ENCRYPTION is not set

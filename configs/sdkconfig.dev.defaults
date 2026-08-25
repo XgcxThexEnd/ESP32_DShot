@@ -1,0 +1,17 @@
+# Development layer for sdkconfig.defaults. This file contains no credentials.
+# It favors diagnostics and deliberately avoids irreversible security fuses.
+CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_HOME_ASSISTANT_DISCOVERY_ENABLED=y
+
+# Keep remote motion/reboot features explicit during bench work.
+# CONFIG_RESTORE_FAN_STATE is not set
+# CONFIG_MQTT_RESTART_ON_TIMEOUT is not set
+# CONFIG_OTA_ENABLED is not set
+
+# Never turn these on implicitly. See docs/production-deployment.md.
+# CONFIG_SECURE_BOOT is not set
+# CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT is not set
+# CONFIG_SECURE_FLASH_ENC_ENABLED is not set
+# CONFIG_NVS_ENCRYPTION is not set
+# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set

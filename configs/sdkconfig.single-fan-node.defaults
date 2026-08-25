@@ -1,0 +1,13 @@
+# Non-secret starting layer for one ESC/motor per ESP32-S3. Review GPIO 5 for
+# the actual board before flashing. A blank NODE_ID derives a stable unique ID
+# from the full factory base MAC, so fan index 1 may be reused on every node.
+CONFIG_FAN_COUNT=1
+CONFIG_FAN_INDEX_START=1
+CONFIG_NODE_ID=""
+CONFIG_MQTT_ROOT_TOPIC="greenhouse_esp"
+CONFIG_DSHOT_GPIO="5"
+
+# Fleet-safe migration/discovery defaults. Enable discovery only with its
+# documented publish-only ACLs; legacy global topics require unique fan indexes.
+# CONFIG_MQTT_LEGACY_TOPICS is not set
+# CONFIG_HOME_ASSISTANT_DISCOVERY_ENABLED is not set

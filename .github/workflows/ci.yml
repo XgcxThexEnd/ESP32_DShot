@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Offline tests and policy checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -r tools/requirements.txt
+
+      - name: Check repository hygiene
+        run: python scripts/check_repository_hygiene.py
+
+      - name: Check tracked release inputs and generated files
+        run: python scripts/check_tracked_generated.py
+
+      - name: Run offline Python tests
+        run: python -m pytest -m "not stress" -v
+
+      - name: Run host controller-policy tests with sanitizers
+        run: python scripts/run_host_policy_tests.py --sanitize
+
+      - name: Build and run controller-policy fuzz target
+        shell: bash
+        run: |
+          mkdir -p build-host-tests
+          clang -std=c11 -Wall -Wextra -Werror -Wpedantic \
+            -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
+            -I main main/controller_policy.c main/dshot_protocol.c \
+            tests/c/fuzz_controller_policy.c \
+            -o build-host-tests/controller_policy_fuzz
+          build-host-tests/controller_policy_fuzz -runs=5000 -max_len=512
+
+  firmware:
+    name: ESP-IDF 6.1 / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: espressif/idf:release-v6.1@sha256:7c7663959a3d6c46ee6bc8a1a532aac02ecdf2b287a88e368434eac66ce2d9c4
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: safe
+            defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults
+          - name: max-four-fan
+            defaults: sdkconfig.defaults;configs/sdkconfig.ci-max-four-fan.defaults
+          - name: optional-features
+            defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults;configs/sdkconfig.ci-optional-features.defaults
+          - name: mqtt-restart
+            defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults;configs/sdkconfig.ci-mqtt-restart.defaults
+          - name: legacy-migration
+            defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults;configs/sdkconfig.ci-legacy.defaults
+          - name: production
+            defaults: sdkconfig.defaults;configs/sdkconfig.single-fan-node.defaults;configs/sdkconfig.production.defaults
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Build firmware
+        shell: bash
+        env:
+          BUILD_DIR: build-ci-${{ matrix.name }}
+          SDKCONFIG_DEFAULTS_LIST: ${{ matrix.defaults }}
+        run: |
+          idf.py -B "$BUILD_DIR" \
+            -D "SDKCONFIG=$PWD/$BUILD_DIR/sdkconfig" \
+            -D "SDKCONFIG_DEFAULTS=$SDKCONFIG_DEFAULTS_LIST" \
+            set-target esp32s3
+          idf.py -B "$BUILD_DIR" \
+            -D "SDKCONFIG=$PWD/$BUILD_DIR/sdkconfig" \
+            -D "SDKCONFIG_DEFAULTS=$SDKCONFIG_DEFAULTS_LIST" \
+            build
+
+      - name: Enforce partition and application-size margin
+        shell: bash
+        env:
+          BUILD_DIR: build-ci-${{ matrix.name }}
+        run: |
+          python scripts/check_firmware_size.py \
+            --partition-table partitions.csv \
+            --app "$BUILD_DIR/dshot_esc.bin" \
+            --json-output "$BUILD_DIR/size-gate.json"
+
+      - name: Ensure the dependency lock is reproducible
+        shell: bash
+        run: git diff --exit-code -- dependencies.lock
+
+      - name: Package unsigned firmware evidence
+        shell: bash
+        env:
+          BUILD_DIR: build-ci-${{ matrix.name }}
+          RELEASE_DIR: build-ci-${{ matrix.name }}/release-artifacts
+        run: |
+          python scripts/package_firmware_artifacts.py \
+            --build-dir "$BUILD_DIR" \
+            --output-dir "$RELEASE_DIR" \
+            --configuration "${{ matrix.name }}"
+
+      - name: Upload unsigned firmware evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: firmware-${{ matrix.name }}-unsigned
+          path: build-ci-${{ matrix.name }}/release-artifacts/
+          if-no-files-found: error
+          retention-days: 14

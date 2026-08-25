@@ -1,0 +1,5 @@
+# Compile the broker-outage restart policy independently from the motor-stop
+# communication lease so both Kconfig branches receive CI coverage.
+CONFIG_COMM_LOSS_CONTINUE=y
+CONFIG_MQTT_RESTART_ON_TIMEOUT=y
+CONFIG_MQTT_WATCHDOG_TIMEOUT_MS=30000

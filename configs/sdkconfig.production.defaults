@@ -1,0 +1,29 @@
+# Reversible production-build layer for sdkconfig.defaults. No credentials or
+# private-key paths belong here. Irreversible device security remains a gated,
+# per-device provisioning step described in docs/production-deployment.md.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# CONFIG_ESP_DEBUG_OCDAWARE is not set
+# CONFIG_FREERTOS_DEBUG_OCDAWARE is not set
+CONFIG_WIFI_REQUIRE_SECURE_AUTH=y
+CONFIG_WIFI_PMF_REQUIRED=y
+CONFIG_MQTT_REQUIRE_TLS_AUTH=y
+# CONFIG_HOME_ASSISTANT_DISCOVERY_ENABLED is not set
+
+# Conservative actuator defaults for a fresh production configuration.
+# CONFIG_RESTORE_FAN_STATE is not set
+# CONFIG_MQTT_RESTART_ON_TIMEOUT is not set
+# CONFIG_OTA_ENABLED is not set
+# CONFIG_SCHEDULE_ENABLED is not set
+
+# Rollback is a reversible boot policy. The application confirms a pending image
+# only after its local motor/RMT/task self-test passes.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# These remain off until the documented signing, key, recovery, and eFuse gates
+# exist. Enabling them blindly can make a device unrecoverable.
+# CONFIG_SECURE_BOOT is not set
+# CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT is not set
+# CONFIG_SECURE_FLASH_ENC_ENABLED is not set
+# CONFIG_NVS_ENCRYPTION is not set

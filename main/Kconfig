@@ -2,10 +2,11 @@ menu "Greenhouse ESP DShot ESC Controller"
 
 config FAN_COUNT
     int "Number of fans (ESCs) to control"
-    range 1 8
+    range 1 4
     default 2
     help
-      Set how many fans (ESCs) this device will control. Each fan uses one DShot GPIO.
+      Set how many fans (ESCs) this device will control. ESP32-S3 exposes four
+      RMT transmit channels, so one node can control at most four DShot outputs.
 
 config FAN_INDEX_START
     int "First fan index (for multi-node setups)"
@@ -13,6 +14,41 @@ config FAN_INDEX_START
     default 1
     help
       The index of the first fan this node controls (e.g., 1 for fans 1-2, 3 for fans 3-4).
+
+config NODE_ID
+    string "Stable node identifier (blank = full base MAC)"
+    default ""
+    help
+      Stable identifier used in MQTT client IDs, topics, and Home Assistant
+      unique IDs. Use only letters, digits, underscore, and hyphen. If blank,
+      the full factory base MAC is used, not a collision-prone MAC suffix.
+
+config MQTT_ROOT_TOPIC
+    string "MQTT root topic"
+    default "greenhouse_esp"
+    help
+      Root topic for node-scoped MQTT traffic. It must be a single non-empty
+      topic level and may contain letters, digits, underscore, and hyphen.
+
+config MQTT_LEGACY_TOPICS
+    bool "Enable legacy global fan topics during migration"
+    default n
+    help
+      Also subscribe and publish <MQTT_ROOT_TOPIC>/fanN and the former global
+      schedule topics. OTA always remains node-scoped. Enable only during a
+      controlled migration with
+      globally unique, non-overlapping fan numbers and restrictive broker ACLs.
+      If Home Assistant discovery is also enabled, its node-identified
+      documents remain authoritative.
+
+config HOME_ASSISTANT_DISCOVERY_ENABLED
+    bool "Publish Home Assistant MQTT discovery"
+    default n
+    help
+      Publish retained fan and optional RPM discovery documents below the
+      broker's homeassistant/ tree. This requires narrowly scoped publish-only
+      ACLs outside the node's normal MQTT subtree. Leave disabled when a
+      central control plane owns discovery or strict node-subtree ACLs are used.
 
 config DSHOT_GPIO
     string "DShot GPIOs (comma-separated, one per fan)"
@@ -36,39 +72,346 @@ config RAMP_STEP_PCT
 
 config RAMP_TICK_MS
     int "Ramp tick interval (ms)"
-    range 1 100
+    range 10 100
     default 20
     help
-      Interval in milliseconds between ramp steps.
+      Interval in milliseconds between ramp steps. The minimum is one tick at
+      the project's default 100 Hz FreeRTOS tick rate.
+
+config MOTOR_INTERLOCK_ENABLED
+    bool "Use an independent motor-enable/interlock GPIO"
+    default n
+    help
+      Drive a hardware enable, relay, or load-switch input. The line remains
+      inactive through boot and is deasserted on safety faults even if RMT is
+      unable to stop a repeating waveform.
+
+config MOTOR_INTERLOCK_GPIO
+    int "Motor interlock GPIO"
+    depends on MOTOR_INTERLOCK_ENABLED
+    range 0 48
+    default 4
+
+config MOTOR_INTERLOCK_ACTIVE_HIGH
+    bool "Motor interlock is active high"
+    depends on MOTOR_INTERLOCK_ENABLED
+    default y
+
+config TACH_FEEDBACK_ENABLED
+    bool "Enable per-fan tachometer feedback with PCNT"
+    default n
+    help
+      Allocate one ESP32-S3 PCNT unit per fan and publish measured RPM. Tach
+      inputs must provide clean logic-level pulses; open-collector outputs can
+      use the optional internal pull-up.
+
+config TACH_GPIO
+    string "Tach GPIOs (comma-separated, one per fan)"
+    depends on TACH_FEEDBACK_ENABLED
+    default "6,8"
+
+config TACH_INTERNAL_PULLUP
+    bool "Enable internal pull-up on tach inputs"
+    depends on TACH_FEEDBACK_ENABLED
+    default y
+
+config TACH_PULSES_PER_REV
+    int "Tach pulses per mechanical revolution"
+    depends on TACH_FEEDBACK_ENABLED
+    range 1 16
+    default 2
+
+config TACH_SAMPLE_MS
+    int "Tach sample interval (ms)"
+    depends on TACH_FEEDBACK_ENABLED
+    range 250 5000
+    default 1000
+
+config TACH_GLITCH_FILTER_NS
+    int "Tach glitch filter (ns, 0 disables)"
+    depends on TACH_FEEDBACK_ENABLED
+    # ESP32-S3 PCNT has a 10-bit APB-cycle filter (1023 ticks). At the normal
+    # 80 MHz APB clock, 12000 ns stays below that hardware limit.
+    range 0 12000
+    default 1000
+
+config TACH_STALL_RPM
+    int "Stall alarm threshold (RPM)"
+    depends on TACH_FEEDBACK_ENABLED
+    range 1 10000
+    default 300
+
+config TACH_STALL_DEBOUNCE_MS
+    int "Stall alarm debounce (ms)"
+    depends on TACH_FEEDBACK_ENABLED
+    range 1000 60000
+    default 5000
+
+config TACH_STARTUP_GRACE_MS
+    int "Spin-up grace before stall monitoring (ms)"
+    depends on TACH_FEEDBACK_ENABLED
+    range 500 30000
+    default 5000
+
+choice TACH_STALL_ACTION
+    prompt "Action after a confirmed tach stall"
+    depends on TACH_FEEDBACK_ENABLED
+    default TACH_STALL_STOP_FAN
+
+config TACH_STALL_ALARM_ONLY
+    bool "Alarm only"
+
+config TACH_STALL_STOP_FAN
+    bool "Latch the affected fan off"
+
+config TACH_STALL_STOP_ALL
+    bool "Latch every fan off"
+endchoice
+
+config RMT_ERROR_LIMIT
+    int "Consecutive RMT errors before safety response"
+    range 2 100
+    default 5
+
+config RMT_FAILURE_REBOOT
+    bool "Reboot after repeated RMT errors"
+    default y
+    help
+      A reset stops an RMT waveform that software could not disable. With a
+      hardware interlock, the interlock is deasserted before reboot.
+
+config SUPERVISOR_ENABLED
+    bool "Enable motor-control supervisor and task watchdog"
+    default y
+
+config SUPERVISOR_TASK_WDT_MS
+    int "Task watchdog timeout (ms)"
+    depends on SUPERVISOR_ENABLED
+    range 6000 30000
+    default 8000
+    help
+      Must exceed the longest bounded safety persistence phase. The supervisor
+      feeds the watchdog between stop phases; six seconds leaves margin around
+      the three-second acknowledged NVS commit.
+
+config RAMP_HEARTBEAT_TIMEOUT_MS
+    int "Maximum allowed ramp-task heartbeat age (ms)"
+    depends on SUPERVISOR_ENABLED
+    range 500 10000
+    default 2000
+
+config SUPERVISOR_AUX_HEARTBEAT_TIMEOUT_MS
+    int "Maximum scheduler/tach task heartbeat age (ms)"
+    depends on SUPERVISOR_ENABLED
+    range 2000 30000
+    default 4000
+    help
+      Fail safe when an enabled scheduler or tach task stops completing its
+      loop. Tach supervision automatically raises this floor to twice the
+      configured tach sample interval plus one second. The separate tach
+      safety-action worker uses a ten-second minimum so its bounded scheduler
+      and NVS commit/escalation phases can complete without a false timeout.
+
+config RESTORE_FAN_STATE
+    bool "Restore last commanded fan speeds after reboot"
+    default n
+    help
+      Opt in to persisting manual fan targets and restoring them after the ESCs
+      have received the zero-throttle arming stream. Disabled by default so a
+      reboot leaves motors stopped until a fresh command or schedule.
+
+config FAN_STATE_SAVE_DEBOUNCE_MS
+    int "Fan-state persistence debounce (ms)"
+    depends on RESTORE_FAN_STATE
+    range 250 10000
+    default 1500
+    help
+      Wait this long after the latest manual command before committing targets
+      to NVS. This coalesces rapid MQTT updates and limits flash wear.
 
 config WIFI_SSID
     string "Wi‑Fi SSID"
-    default "Tent"
+    default ""
     help
       SSID for Wi‑Fi station mode.
 
 config WIFI_PASS
     string "Wi‑Fi Password"
-    default "1LoveW33D"
+    default ""
     help
-      Password for Wi‑Fi station mode.
+      Password for Wi-Fi station mode.
+
+config WIFI_REQUIRE_SECURE_AUTH
+    bool "Require WPA2/WPA3 Wi-Fi authentication"
+    default y
+    help
+      Production policy gate. Reject an empty password and refuse open/WPA1
+      access points. Disable only on an explicitly isolated development WLAN.
+
+config WIFI_PMF_REQUIRED
+    bool "Require protected management frames (PMF)"
+    default y
+    help
+      Require 802.11w PMF. Disable only when interoperating with a known WPA2
+      access point that cannot provide PMF.
+
+config WIFI_SET_MAX_TX_POWER
+    bool "Override Wi-Fi maximum transmit power"
+    default n
+    help
+      Leave disabled to use the platform/region default. When enabled, ensure
+      the selected value and antenna gain comply with local regulations.
+
+config WIFI_MAX_TX_POWER_QDBM
+    int "Wi-Fi maximum transmit power (quarter-dBm)"
+    depends on WIFI_SET_MAX_TX_POWER
+    range 8 84
+    default 60
+
+config WIFI_RETRY_BASE_MS
+    int "Wi-Fi reconnect base delay (ms)"
+    range 250 10000
+    default 1000
+
+config WIFI_RETRY_MAX_MS
+    int "Wi-Fi reconnect maximum delay (ms)"
+    range 1000 300000
+    default 60000
+
+config WIFI_STARTUP_GRACE_MS
+    int "Initial Wi-Fi grace period before degraded mode (ms)"
+    range 1000 300000
+    default 30000
+
+config TLS_SNTP_SERVER
+    string "SNTP server used before TLS connections"
+    default "pool.ntp.org"
+    help
+      MQTTs and HTTPS certificate validity checks require trustworthy wall
+      time. DNS and UDP access to this server must be available to the node.
+
+config TLS_TIME_SYNC_TIMEOUT_MS
+    int "Initial TLS time-sync wait (ms)"
+    range 1000 120000
+    default 30000
+    help
+      A timeout leaves network services degraded/offline while SNTP continues
+      retrying. Certificate date verification is never bypassed.
 
 config MQTT_BROKER_URI
     string "MQTT broker URI"
-    default "mqtt://192.168.53.174"
+    default ""
     help
       Broker URI like mqtt://host or mqtts://host.
 
 config MQTT_USERNAME
     string "MQTT username"
-    default "greenhouse_esp"
+    default ""
     help
       Username for MQTT authentication.
 
 config MQTT_PASSWORD
     string "MQTT password"
-    default "1LoveW33D"
+    default ""
     help
       Password for MQTT authentication.
+
+config MQTT_REQUIRE_TLS_AUTH
+    bool "Require MQTT TLS and non-empty authentication"
+    default y
+    help
+      Production policy gate. Reject mqtt:// broker URIs and empty username or
+      password at runtime. Disable only for an explicitly isolated development
+      broker. Device certificate provisioning can be layered onto this policy.
+
+config MQTT_OUTBOX_LIMIT_BYTES
+    int "MQTT QoS outbox limit (bytes)"
+    range 4096 131072
+    default 16384
+    help
+      Bounds heap consumed by unacknowledged QoS messages. State publications
+      are coalesced by the heartbeat if this budget is temporarily exhausted.
+
+config MQTT_SUBSCRIBE_TIMEOUT_MS
+    int "Required subscription acknowledgement timeout (ms)"
+    range 3000 60000
+    default 10000
+
+choice COMM_LOSS_POLICY
+    prompt "Motor policy when confirmed MQTT health is lost"
+    default COMM_LOSS_CONTINUE
+
+config COMM_LOSS_CONTINUE
+    bool "Continue local control and schedules"
+
+config COMM_LOSS_STOP_AFTER_LEASE
+    bool "Latch motors off after a communication lease expires"
+endchoice
+
+config COMMUNICATION_LEASE_MS
+    int "Communication health lease (ms)"
+    depends on COMM_LOSS_STOP_AFTER_LEASE
+    range 5000 3600000
+    default 120000
+    help
+      Time since the most recent broker acknowledgement before motors are
+      latched off. A fresh non-retained manual command clears this latch.
+
+config MQTT_RESTART_ON_TIMEOUT
+    bool "Restart controller after prolonged MQTT outage"
+    default n
+    help
+      Opt in to rebooting after a prolonged broker outage. Disabled by default
+      because the MQTT client reconnects automatically and a network failure
+      must not interrupt local motor control.
+
+config MQTT_WATCHDOG_TIMEOUT_MS
+    int "MQTT watchdog timeout (ms)"
+    depends on MQTT_RESTART_ON_TIMEOUT
+    range 30000 600000
+    default 120000
+    help
+      Restart the device if MQTT is unreachable for this long.
+
+config OTA_ENABLED
+    bool "Enable MQTT-triggered HTTPS OTA updates"
+    depends on BOOTLOADER_APP_ROLLBACK_ENABLE
+    default n
+    help
+      Subscribe to the OTA command topic and allow remote firmware updates.
+      Leave this disabled unless the broker topic is protected by an ACL and
+      OTA_ALLOWED_URL_PREFIX is set to a trusted HTTPS location. Bootloader
+      rollback is mandatory so an image that fails its local motor/task health
+      window cannot become permanent.
+
+config OTA_ALLOWED_URL_PREFIX
+    string "Allowed HTTPS OTA URL prefix"
+    depends on OTA_ENABLED
+    default ""
+    help
+      Every OTA URL must begin with this exact prefix. The value must start
+      with https:// and end with '/', for example
+      https://updates.example.com/greenhouse/. Redirects are disabled.
+
+config SCHEDULE_ENABLED
+    bool "Enable scheduled fan profiles"
+    default n
+    help
+      Allow defining persisted uptime-relative fan schedules via MQTT. A
+      schedule can start a motor without a fresh command, so it is opt-in.
+
+config SCHEDULE_SLOTS
+    int "Number of schedule slots per fan"
+    depends on SCHEDULE_ENABLED
+    range 1 8
+    default 4
+    help
+      How many schedule entries each fan can have.
+
+config SCHEDULE_SAVE_DEBOUNCE_MS
+    int "Schedule persistence debounce (ms)"
+    depends on SCHEDULE_ENABLED
+    range 250 10000
+    default 1000
 
 endmenu

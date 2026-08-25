@@ -1,0 +1,18 @@
+* text=auto
+
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.ps1 text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.csv text eol=lf
+*.defaults text eol=lf
+*.lock text eol=lf
+
+*.bin binary
+*.elf binary
+*.p12 binary
+*.pfx binary
+*.der binary
