@@ -68,6 +68,21 @@ production build is therefore not evidence that Secure Boot or flash encryption
 is active on a device. Record and verify the generated configuration and the
 read-only eFuse summary for each manufactured unit.
 
+Validate the resolved credential-free CI profile with:
+
+```bash
+python scripts/check_production_sdkconfig.py \
+  --sdkconfig build-production/sdkconfig --mode template
+```
+
+Before creating a deployable artifact, copy and review
+`configs/production-release-policy.example.json`, then run the same checker in
+`release` mode against the exact provisioned sdkconfig. The policy records every
+deployment-dependent interlock, tach, communication-loss, restoration,
+schedule, OTA, signing, encryption, and anti-rollback choice without containing
+credentials. See [`fault-response-policy.md`](fault-response-policy.md) for the
+required hazard decisions. The example values are not a board wiring approval.
+
 ## Per-device identity and provisioning
 
 Use a manufacturing identity that is unique, stable, and bound to a credential.
@@ -239,6 +254,14 @@ For every release:
 
 Use the node-scoped OTA topic and a release-role ACL to target exactly one canary.
 The firmware does not accept a legacy global OTA topic.
+
+CI's unsigned evidence bundle now includes the app, bootloader, partition table,
+initial OTA data, a portable offset/hash manifest, the ELF/map, dependency lock,
+size report, redacted configuration, source commit, builder identity, and
+path-free ESP-IDF project metadata. This makes a build traceable and locally
+recoverable; it does **not** make it authentic. `RELEASE-METADATA.json` continues
+to declare `production_ota_suitable: false` until a separately protected signing
+workflow and device-side verification policy are implemented.
 
 ## Partition decision record
 

@@ -17,6 +17,28 @@ git ls-files -- sdkconfig sdkconfig.old
 The final command must print nothing. The checker intentionally prints only a
 path, line, and setting/marker name; it never prints a suspected value.
 
+Scan only the commits being proposed for a branch or pull request with:
+
+```bash
+python scripts/check_git_history_secrets.py origin/main..HEAD
+```
+
+The history scanner reads the changed blob/path pairs in the selected commits
+directly and reports only paths, marker names, and abbreviated blob IDs. This
+also detects an existing blob copied or renamed to a sensitive filename. Running
+it with no revision scans commits reachable from every local ref and is expected
+to fail until the known historical `sdkconfig` objects have been removed. Do not
+make that known failure non-blocking evidence that the old credentials are safe;
+rotate/revoke them first.
+
+This is a project-specific, high-signal guardrail, not a general secret scanner.
+It covers generated configuration and provisioning paths, common private-key
+containers and PEM markers, uppercase credential assignments, and credentials
+embedded in MQTT URLs. It does not exhaustively identify provider-specific
+tokens, arbitrary structured JSON/YAML fields, or high-entropy values. Keep
+hosting-platform secret scanning enabled and use provider-aware scanning during
+incident response.
+
 ## Known-history response
 
 This repository previously tracked generated configuration containing non-empty

@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 #define STATE_PUBLISHER_BOOT_HEALTH_CAPACITY 32
+#define STATE_PUBLISHER_STOP_REASON_CAPACITY 80
 
 /**
  * Controller-owned health fields which cannot be read from an extracted
@@ -21,7 +22,9 @@ extern "C" {
  */
 typedef struct {
     char boot_health[STATE_PUBLISHER_BOOT_HEALTH_CAPACITY];
+    bool interlock_configured;
     bool interlock_enabled;
+    bool stop_in_progress;
     bool communication_failsafe_active;
     bool global_safety_latched;
     bool ramp_liveness_fault;
@@ -34,6 +37,9 @@ typedef struct {
     bool mqtt_command_overflow_fault;
     bool mqtt_dispatch_liveness_fault;
     UBaseType_t supervisor_stack_words;
+    uint32_t stop_count;
+    esp_err_t last_stop_result;
+    char last_stop_reason[STATE_PUBLISHER_STOP_REASON_CAPACITY];
 } state_publisher_coordinator_health_t;
 
 /**
@@ -66,11 +72,11 @@ void state_publisher_request_fan(int local_fan, bool full_retained);
 /** Request retained QoS-1 state snapshots for every configured fan. */
 void state_publisher_request_all(void);
 
-/** Publish HA discovery, availability, node metadata, fan list, and node-up. */
-void state_publisher_publish_discovery_and_metadata(void);
+/** Request HA discovery, availability, node metadata, fan list, and node-up. */
+void state_publisher_request_discovery_and_metadata(void);
 
-/** Publish retained motor metrics and the non-retained QoS-1 health probe. */
-void state_publisher_publish_periodic_metrics_health(void);
+/** Request retained motor metrics and the non-retained QoS-1 health probe. */
+void state_publisher_request_periodic_metrics_health(void);
 
 /** Publish the typed acknowledgement for one accepted manual command. */
 bool state_publisher_publish_manual_ack(int local_fan,

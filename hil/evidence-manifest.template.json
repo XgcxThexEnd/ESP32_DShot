@@ -1,0 +1,159 @@
+{
+  "schema": "esp32-dshot-hil-evidence/v1",
+  "record_status": "draft",
+  "release": {
+    "configuration": "ci-four-fan-safety-tach-stop-all",
+    "esp_idf_version": "v6.1",
+    "firmware_commit": "0000000000000000000000000000000000000000",
+    "node_id": "ci-four-fan-safety",
+    "firmware_path": "artifacts/dshot_esc.bin",
+    "firmware_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "release_metadata_path": "artifacts/RELEASE-METADATA.json",
+    "release_metadata_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "flash_manifest_path": "artifacts/FLASH-MANIFEST.json",
+    "flash_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "sdkconfig_redacted_path": "artifacts/sdkconfig.redacted",
+    "sdkconfig_redacted_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "topology_fingerprint": "0000000000000000",
+    "tested_at_utc": null
+  },
+  "hardware": {
+    "board_revision": "REPLACE_ME",
+    "fan_count": 4,
+    "fan_index_start": 1,
+    "dshot_gpios": [5, 7, 9, 11],
+    "esc": {
+      "model": "REPLACE_ME",
+      "firmware": "REPLACE_ME"
+    },
+    "interlock": {
+      "enabled": true,
+      "gpio": 4,
+      "active_high": true
+    },
+    "tachometer": {
+      "enabled": true,
+      "gpios": [6, 8, 10, 12],
+      "pulses_per_revolution": 2
+    }
+  },
+  "test_limits": {
+    "supply_voltage_v": null,
+    "current_limit_a": null,
+    "maximum_motor_temperature_c": null,
+    "maximum_esc_temperature_c": null,
+    "soak_duration_s": null
+  },
+  "artifacts": [
+    {
+      "id": "boot-dshot-capture",
+      "kind": "logic_analyzer_csv",
+      "path": "artifacts/boot-dshot.csv",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "steady-dshot-capture",
+      "kind": "logic_analyzer_csv",
+      "path": "artifacts/steady-dshot.csv",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "interlock-capture",
+      "kind": "oscilloscope_capture",
+      "path": "artifacts/interlock-reset-and-faults.csv",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "tach-comparison",
+      "kind": "tach_reference_csv",
+      "path": "artifacts/tach-comparison.csv",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "network-recovery-log",
+      "kind": "mqtt_and_serial_log",
+      "path": "artifacts/network-recovery.log",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "ota-rollback-log",
+      "kind": "serial_log",
+      "path": "artifacts/ota-rollback.log",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "power-ordering-capture",
+      "kind": "oscilloscope_capture",
+      "path": "artifacts/power-ordering.csv",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "soak-log",
+      "kind": "soak_csv",
+      "path": "artifacts/soak.csv",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "checks": [
+    {
+      "id": "dshot_timing",
+      "status": "not_run",
+      "artifact_ids": ["steady-dshot-capture"],
+      "notes": "Validate every configured DShot GPIO at steady output and during changes."
+    },
+    {
+      "id": "protocol_safety",
+      "status": "not_run",
+      "artifact_ids": ["boot-dshot-capture", "steady-dshot-capture"],
+      "notes": "Verify checksums, MSB-first order, no reserved commands, and telemetry bit."
+    },
+    {
+      "id": "startup_zero",
+      "status": "not_run",
+      "artifact_ids": ["boot-dshot-capture"],
+      "notes": "Cover power-on, software, watchdog, and brownout-style resets."
+    },
+    {
+      "id": "channel_isolation",
+      "status": "not_run",
+      "artifact_ids": ["steady-dshot-capture"],
+      "notes": "Show that only the addressed fan GPIO leaves zero."
+    },
+    {
+      "id": "interlock_fail_safe",
+      "status": "not_run",
+      "artifact_ids": ["interlock-capture"],
+      "notes": "Measure reset default, task-stall, watchdog, and injected safety-stop behavior."
+    },
+    {
+      "id": "tach_feedback",
+      "status": "not_run",
+      "artifact_ids": ["tach-comparison"],
+      "notes": "Correlate all channels and inject missing, stuck, and noisy feedback."
+    },
+    {
+      "id": "network_recovery",
+      "status": "not_run",
+      "artifact_ids": ["network-recovery-log"],
+      "notes": "Exercise broker, Wi-Fi, DNS, TLS, queue saturation, and lease policy."
+    },
+    {
+      "id": "ota_rollback",
+      "status": "not_run",
+      "artifact_ids": ["ota-rollback-log"],
+      "notes": "Show healthy confirmation and motion-safe forced rollback."
+    },
+    {
+      "id": "power_ordering",
+      "status": "not_run",
+      "artifact_ids": ["power-ordering-capture"],
+      "notes": "Cover ESP32, ESC, and signal removal/application orders and brownout."
+    },
+    {
+      "id": "soak",
+      "status": "not_run",
+      "artifact_ids": ["soak-log"],
+      "notes": "Record voltage, current, motor/ESC temperature, resets, stacks, heap, and RMT errors."
+    }
+  ]
+}

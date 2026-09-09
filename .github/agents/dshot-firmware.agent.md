@@ -16,7 +16,11 @@ fan controls.
 
 ## Project layout
 
-- Firmware and application logic: [main/app_main.c](../../main/app_main.c).
+- Boot order and cross-module coordination: [main/app_main.c](../../main/app_main.c).
+- Configuration, networking, command routing, motor/tach control, scheduling,
+  persistence, OTA, state publishing, and safety supervision are separate
+  modules under [main/](../../main/); use the ownership map in
+  [README.md](../../README.md#firmware-architecture).
 - DShot encoder: [main/dshot_esc_encoder.c](../../main/dshot_esc_encoder.c) and
   [main/dshot_esc_encoder.h](../../main/dshot_esc_encoder.h).
 - User configuration: [main/Kconfig](../../main/Kconfig).
@@ -50,9 +54,10 @@ never add credentials or generated sdkconfig files to source control.
   uses certificate-bundle verification, disables redirects, and stops all
   motors before downloading. Production devices should also use signed images,
   secure boot, and rollback protection.
-- Bidirectional telemetry and the stall watchdog are disabled and excluded from
-  the build. Do not advertise or depend on those metrics unless the feature is
-  deliberately redesigned and tested end to end.
+- Experimental bidirectional DShot telemetry is disabled and excluded from the
+  build. Independent PCNT tach feedback and its stall actions are supported but
+  opt-in; advertise mechanical RPM/stall state only when they are wired,
+  calibrated, enabled, and tested end to end.
 
 ## Working with this repository
 

@@ -1,0 +1,19 @@
+# Compile-only coverage for the maximum fan count with every hardware safety
+# input/output present. Layer this after sdkconfig.ci-safe.defaults and before
+# exactly one sdkconfig.ci-tach-*.defaults action selector.
+#
+# These GPIOs are non-conflicting ESP32-S3 build fixtures. They are not a board
+# wiring recommendation and this configuration must never be flashed as-is.
+CONFIG_FAN_COUNT=4
+CONFIG_FAN_INDEX_START=1
+CONFIG_NODE_ID="ci-four-fan-safety"
+CONFIG_DSHOT_GPIO="5,7,9,11"
+
+CONFIG_MOTOR_INTERLOCK_ENABLED=y
+CONFIG_MOTOR_INTERLOCK_GPIO=4
+CONFIG_MOTOR_INTERLOCK_ACTIVE_HIGH=y
+
+CONFIG_TACH_FEEDBACK_ENABLED=y
+CONFIG_TACH_GPIO="6,8,10,12"
+CONFIG_TACH_PULSES_PER_REV=2
+# CONFIG_TACH_INTERNAL_PULLUP is not set

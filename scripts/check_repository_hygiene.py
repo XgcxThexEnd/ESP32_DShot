@@ -16,7 +16,18 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 BLOCKED_NAMES = {"sdkconfig", "sdkconfig.old", ".env"}
-BLOCKED_SUFFIXES = {".key", ".p12", ".pfx", ".jks", ".keystore"}
+ALLOWED_ENV_NAMES = {".env.example"}
+BLOCKED_SUFFIXES = {
+    ".key",
+    ".private.pem",
+    ".signing.pem",
+    ".p12",
+    ".pfx",
+    ".jks",
+    ".keystore",
+    ".nvs.bin",
+    ".nvs.csv",
+}
 SENSITIVE_CONFIG = re.compile(
     rb"^(CONFIG_(?:WIFI_(?:SSID|PASS)|MQTT_(?:BROKER_URI|USERNAME|PASSWORD)))=(.*)$"
 )
@@ -25,6 +36,23 @@ PRIVATE_KEY = re.compile(
 )
 EMBEDDED_MQTT_CREDENTIALS = re.compile(rb"mqtts?://[^\s/:@]+:[^\s/@]+@", re.I)
 DOCUMENTED_TEST_URIS = {b"mqtt://user:pass@broker", b"mqtts://user:pass@broker"}
+
+
+def is_blocked_filename(name: str) -> bool:
+    lowered = name.lower()
+    blocked_env = lowered.startswith(".env.") and lowered not in ALLOWED_ENV_NAMES
+    return (
+        lowered in BLOCKED_NAMES
+        or blocked_env
+        or any(lowered.endswith(suffix) for suffix in BLOCKED_SUFFIXES)
+    )
+
+
+def is_private_path(path: str) -> bool:
+    casefolded = path.replace("\\", "/").casefold()
+    return casefolded.startswith("secrets/") or casefolded.startswith(
+        "provisioning/private/"
+    )
 
 
 def candidate_paths() -> list[PurePosixPath]:
@@ -51,12 +79,10 @@ def main() -> int:
 
     for rel in paths:
         display = rel.as_posix()
-        lowered = rel.name.lower()
-        suffix = rel.suffix.lower()
-        if lowered in BLOCKED_NAMES or suffix in BLOCKED_SUFFIXES:
+        if is_blocked_filename(rel.name):
             findings.append(f"{display}: generated config or private-key container is committable")
             continue
-        if display.startswith("secrets/") or display.startswith("provisioning/private/"):
+        if is_private_path(display):
             findings.append(f"{display}: private provisioning path is committable")
             continue
 

@@ -13,6 +13,10 @@ Every file here is non-secret and is intended to be layered after the common
 | `sdkconfig.ci-optional-features.defaults` | compile schedules, persistence, OTA/rollback, interlock, tach, communication fail-safe, and Home Assistant discovery |
 | `sdkconfig.ci-mqtt-restart.defaults` | compile broker-restart policy with the continue-running lease policy |
 | `sdkconfig.ci-legacy.defaults` | compile the bounded legacy-topic migration path at fan indexes 5–8 |
+| `sdkconfig.ci-four-fan-safety.defaults` | compile four DShot channels with four tach inputs and an active-high interlock |
+| `sdkconfig.ci-tach-alarm-only.defaults` | select the tach alarm-only action branch |
+| `sdkconfig.ci-tach-stop-fan.defaults` | select the tach stop-affected-fan action branch |
+| `sdkconfig.ci-tach-stop-all.defaults` | select the tach stop-all-fans action branch |
 
 The CI fan GPIO lists are build fixtures, not wiring recommendations. All local
 credentials belong in an ignored `sdkconfig.<environment>.local`, never in a
@@ -31,3 +35,19 @@ Example one-fan production layer order:
 ```text
 sdkconfig.defaults;configs/sdkconfig.single-fan-node.defaults;configs/sdkconfig.production.defaults
 ```
+
+The four-fan hardware-safety fragment is compile-only and must be followed by
+exactly one tach-action selector. Add these entries to the firmware CI matrix
+to compile every mutually exclusive action branch at the four-channel limit:
+
+```yaml
+- name: four-fan-tach-alarm-only
+  defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults;configs/sdkconfig.ci-four-fan-safety.defaults;configs/sdkconfig.ci-tach-alarm-only.defaults
+- name: four-fan-tach-stop-fan
+  defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults;configs/sdkconfig.ci-four-fan-safety.defaults;configs/sdkconfig.ci-tach-stop-fan.defaults
+- name: four-fan-tach-stop-all
+  defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults;configs/sdkconfig.ci-four-fan-safety.defaults;configs/sdkconfig.ci-tach-stop-all.defaults
+```
+
+These rows prove only that the configurations compile. The placeholder GPIOs
+must not be flashed without a board-specific electrical and pin-use review.

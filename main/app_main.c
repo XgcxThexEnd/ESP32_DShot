@@ -105,6 +105,10 @@ static void publish_states(void);
 #define TACH_ACTION_HEARTBEAT_MS  250
 #define TACH_CLEAR_SERIALIZE_WAIT_MS 10000
 
+_Static_assert(
+    STATE_PUBLISHER_STOP_REASON_CAPACITY >= SAFETY_SUPERVISOR_REASON_CAPACITY,
+    "publisher stop-reason capacity must preserve supervisor diagnostics");
+
 static bool reset_reason_allows_motion_restore(esp_reset_reason_t reason)
 {
     // Only resets which are expected during normal operation may consume a
@@ -492,7 +496,10 @@ static void read_publisher_coordinator_health(
     (void)snprintf(
         out_snapshot->boot_health, sizeof(out_snapshot->boot_health), "%s",
         safety_supervisor_boot_health_name(safety.boot_health));
+    out_snapshot->interlock_configured =
+        safety.hardware_interlock_present;
     out_snapshot->interlock_enabled = safety.interlock_enabled;
+    out_snapshot->stop_in_progress = safety.stop_in_progress;
     out_snapshot->communication_failsafe_active =
         safety.communication_failsafe_active;
     out_snapshot->global_safety_latched = safety.global_safety_latched;
@@ -510,6 +517,11 @@ static void read_publisher_coordinator_health(
     out_snapshot->mqtt_dispatch_liveness_fault =
         safety.mqtt_dispatch_liveness_fault;
     out_snapshot->supervisor_stack_words = safety.stack_words;
+    out_snapshot->stop_count = safety.stop_count;
+    out_snapshot->last_stop_result = safety.last_stop_result;
+    (void)snprintf(out_snapshot->last_stop_reason,
+                   sizeof(out_snapshot->last_stop_reason), "%s",
+                   safety.last_stop_reason);
 }
 
 
@@ -1324,10 +1336,10 @@ void app_main(void)
         }
         if (mqtt_manager_ready()) {
             if (mqtt_manager_take_initial_publish()) {
-                state_publisher_publish_discovery_and_metadata();
+                state_publisher_request_discovery_and_metadata();
             }
             state_publisher_request_all();
-            state_publisher_publish_periodic_metrics_health();
+            state_publisher_request_periodic_metrics_health();
         }
 #ifdef CONFIG_MQTT_RESTART_ON_TIMEOUT
         {

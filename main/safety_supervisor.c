@@ -166,7 +166,6 @@ static esp_err_t stop_all_internal(const char *reason,
     if (s_stop_depth < UINT32_MAX) s_stop_depth++;
     s_safety_generation++;
     if (s_stop_count < UINT32_MAX) s_stop_count++;
-    memcpy(s_last_stop_reason, reason_copy, sizeof(s_last_stop_reason));
     callbacks = s_callbacks;
     SemaphoreHandle_t stop_mutex = s_stop_mutex;
     portEXIT_CRITICAL(&s_state_lock);
@@ -281,6 +280,7 @@ static esp_err_t stop_all_internal(const char *reason,
 
     portENTER_CRITICAL(&s_state_lock);
     s_last_stop_result = result;
+    memcpy(s_last_stop_reason, reason_copy, sizeof(s_last_stop_reason));
     if (s_stop_depth > 0) s_stop_depth--;
     portEXIT_CRITICAL(&s_state_lock);
 

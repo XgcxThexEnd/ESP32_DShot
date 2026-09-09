@@ -1,0 +1,4 @@
+# Tach action choice selector. Layer after sdkconfig.ci-four-fan-safety.defaults.
+# CONFIG_TACH_STALL_ALARM_ONLY is not set
+# CONFIG_TACH_STALL_STOP_FAN is not set
+CONFIG_TACH_STALL_STOP_ALL=y

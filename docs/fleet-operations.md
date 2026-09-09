@@ -74,8 +74,8 @@ fan.
 | `<node>/fanN/applied_percentage` | active RMT percentage | not proof of mechanical rotation |
 | `<node>/fanN/measured_rpm` | valid independent tach sample | present only when tach feedback is enabled/wired |
 | `<node>/fanN/rmt_refresh_count` and error metrics | RMT activity/failures | positive refresh change is not proof the fan rotates |
-| `<node>/health` | heap, MQTT ACK/outbox, Wi-Fi, interlock, fail-safe, stacks | alert thresholds are deployment-specific |
-| `<node>/info` | app/IDF version, partition, reset reason, boot health, flags | add artifact digest/config revision in external inventory |
+| `<node>/health` | heap, MQTT ACK/outbox, Wi-Fi, configured/active interlock state, fail-safe, completed-stop tuple, stacks, topology | alert thresholds are deployment-specific; `stop_in_progress` distinguishes active work from the last completed result |
+| `<node>/info` | app/IDF version, partition, reset reason, boot health, flags, topology fingerprint | add artifact digest/config revision in external inventory |
 | `<node>/ota/status` | coarse OTA lifecycle | `downloaded_rebooting` is not post-boot health |
 
 Alert at minimum on stale availability/metrics, duplicate client IDs, repeated

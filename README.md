@@ -175,8 +175,8 @@ like `esp32s3_A1B2C3D4E5F6` from the full base MAC. For displayed fan index `N`:
 | `P/fanN/rmt_refresh_count` | metric | monotonic successful refresh count |
 | `P/fanN/rmt_error_total` | metric | cumulative RMT application errors |
 | `P/fanN/rmt_error_consecutive` | metric | current consecutive RMT error count |
-| `P/health` | reported | heap, MQTT ACKs/outbox, Wi-Fi, interlock, fail-safe, and task health |
-| `P/info` | inventory | app/IDF version, partition, reset reason, boot health, and feature flags |
+| `P/health` | reported | heap, MQTT ACKs/outbox, Wi-Fi, configured/active interlock state, fail-safe and stop status/result, task stacks, and topology fingerprint |
+| `P/info` | inventory | app/IDF version, partition, reset reason, boot health, feature flags, and topology fingerprint |
 | `P/fans` | inventory | local displayed fan indexes |
 | `P/announce` | event | non-retained node-up inventory event |
 | `P/status` | availability | retained `online`; MQTT last will publishes `offline` |
@@ -368,6 +368,12 @@ flash-encryption eFuses.
   release evidence.
 - [`docs/repository-security.md`](docs/repository-security.md): secret handling,
   credential rotation, coordinated history cleanup, and repository checks.
+- [`docs/fault-response-policy.md`](docs/fault-response-policy.md): explicit
+  deployment decisions for communication, task, tach, reset, persistence, and
+  OTA failures.
+- [`docs/ai-gardener.md`](docs/ai-gardener.md): an advisory-first camera/sensor
+  companion architecture with executable observation/recommendation contracts
+  and a deterministic authorization boundary.
 
 Run the value-redacting repository check before pushing:
 

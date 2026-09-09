@@ -203,3 +203,44 @@ At minimum, release evidence should show:
 Any analyzer failure is a failed hardware gate until explained and reproduced.
 Archive exceptions with measured evidence and an explicit engineering decision;
 do not normalize them by weakening the validator defaults.
+
+## Machine-readable release evidence
+
+Use [`hil/evidence-manifest.template.json`](../hil/evidence-manifest.template.json)
+to make the required checks, hardware identity, test limits, and raw-artifact
+hashes reviewable as one record. Copy the template into a release-specific
+evidence directory and keep each artifact path relative to that copy. Actual
+captures may be archived outside Git, but the manifest and its hashes must stay
+with the release record.
+
+The repository template is deliberately incomplete. Validate its structure, or
+an in-progress copy, with:
+
+```bash
+python scripts/validate_hil_evidence.py \
+  path/to/evidence/manifest.json --allow-incomplete
+```
+
+Before release, replace every placeholder, enter the actual supply/current/
+temperature/soak limits, resolve every `not_run` result, set `record_status` to
+`complete`, copy the tested bundle's complete flash package (including every
+file named by `FLASH-MANIFEST.json`), redacted sdkconfig, and
+`RELEASE-METADATA.json` to the recorded relative paths, enter their hashes and
+the node-reported topology fingerprint, and run the strict gate:
+
+```bash
+python scripts/validate_hil_evidence.py path/to/evidence/manifest.json
+```
+
+Strict validation verifies required check IDs, configuration/hardware
+consistency, non-overlapping GPIO assignments, safe relative artifact paths,
+file presence, and SHA-256 integrity. It enforces the required artifact IDs,
+kinds, distinct paths, and check-to-artifact mappings documented in
+[`hil/README.md`](../hil/README.md). It also verifies the schema-v1 flash plan
+and every packaged bootloader, partition, OTA-data, and application file; the
+resolved sdkconfig must be parseable and contain no populated sensitive value.
+It permits `not_applicable` only for the interlock, tach, and OTA/rollback
+checks and requires a written justification; an enabled interlock or tachometer
+cannot waive its corresponding check. The validator does not interpret the
+captured electrical or thermal measurements, so an engineer must still compare
+every result with the recorded acceptance limits and this procedure.

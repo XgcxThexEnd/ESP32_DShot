@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
 
       - name: Set up Python 3.12
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -32,11 +34,45 @@ jobs:
       - name: Check repository hygiene
         run: python scripts/check_repository_hygiene.py
 
+      - name: Check secrets introduced by proposed history
+        shell: bash
+        env:
+          HISTORY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HISTORY_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          zero=0000000000000000000000000000000000000000
+          head="$HISTORY_HEAD"
+          if ! git cat-file -e "$head^{commit}" 2>/dev/null; then
+            head=HEAD
+          fi
+          base=""
+          if [ -n "$HISTORY_BASE" ] && [ "$HISTORY_BASE" != "$zero" ] && \
+             git cat-file -e "$HISTORY_BASE^{commit}" 2>/dev/null; then
+            base="$HISTORY_BASE"
+          elif git show-ref --verify --quiet refs/remotes/origin/main; then
+            if candidate="$(git merge-base refs/remotes/origin/main "$head")"; then
+              if [ "$candidate" != "$head" ]; then
+                base="$candidate"
+              fi
+            fi
+          fi
+          if [ -z "$base" ] && git rev-parse "$head^" >/dev/null 2>&1; then
+            base="$head^"
+          fi
+          if [ -n "$base" ]; then
+            python scripts/check_git_history_secrets.py "$base..$head"
+          else
+            python scripts/check_git_history_secrets.py "$head"
+          fi
+
       - name: Check tracked release inputs and generated files
         run: python scripts/check_tracked_generated.py
 
       - name: Run offline Python tests
         run: python -m pytest -m "not stress" -v
+
+      - name: Validate HIL evidence template structure
+        run: python scripts/validate_hil_evidence.py hil/evidence-manifest.template.json --allow-incomplete
 
       - name: Run host controller-policy tests with sanitizers
         run: python scripts/run_host_policy_tests.py --sanitize
@@ -74,6 +110,12 @@ jobs:
             defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults;configs/sdkconfig.ci-legacy.defaults
           - name: production
             defaults: sdkconfig.defaults;configs/sdkconfig.single-fan-node.defaults;configs/sdkconfig.production.defaults
+          - name: four-fan-tach-alarm-only
+            defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults;configs/sdkconfig.ci-four-fan-safety.defaults;configs/sdkconfig.ci-tach-alarm-only.defaults
+          - name: four-fan-tach-stop-fan
+            defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults;configs/sdkconfig.ci-four-fan-safety.defaults;configs/sdkconfig.ci-tach-stop-fan.defaults
+          - name: four-fan-tach-stop-all
+            defaults: sdkconfig.defaults;configs/sdkconfig.ci-safe.defaults;configs/sdkconfig.ci-four-fan-safety.defaults;configs/sdkconfig.ci-tach-stop-all.defaults
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -84,6 +126,7 @@ jobs:
           BUILD_DIR: build-ci-${{ matrix.name }}
           SDKCONFIG_DEFAULTS_LIST: ${{ matrix.defaults }}
         run: |
+          source "$IDF_PATH/export.sh"
           idf.py -B "$BUILD_DIR" \
             -D "SDKCONFIG=$PWD/$BUILD_DIR/sdkconfig" \
             -D "SDKCONFIG_DEFAULTS=$SDKCONFIG_DEFAULTS_LIST" \
@@ -92,6 +135,13 @@ jobs:
             -D "SDKCONFIG=$PWD/$BUILD_DIR/sdkconfig" \
             -D "SDKCONFIG_DEFAULTS=$SDKCONFIG_DEFAULTS_LIST" \
             build
+
+      - name: Enforce credential-free production template policy
+        if: matrix.name == 'production'
+        shell: bash
+        env:
+          BUILD_DIR: build-ci-${{ matrix.name }}
+        run: python scripts/check_production_sdkconfig.py --sdkconfig "$BUILD_DIR/sdkconfig" --mode template
 
       - name: Enforce partition and application-size margin
         shell: bash
@@ -112,11 +162,14 @@ jobs:
         env:
           BUILD_DIR: build-ci-${{ matrix.name }}
           RELEASE_DIR: build-ci-${{ matrix.name }}/release-artifacts
+          ESP_IDF_BUILDER_IMAGE: espressif/idf:release-v6.1@sha256:7c7663959a3d6c46ee6bc8a1a532aac02ecdf2b287a88e368434eac66ce2d9c4
         run: |
           python scripts/package_firmware_artifacts.py \
             --build-dir "$BUILD_DIR" \
             --output-dir "$RELEASE_DIR" \
-            --configuration "${{ matrix.name }}"
+            --configuration "${{ matrix.name }}" \
+            --source-commit "$GITHUB_SHA" \
+            --require-clean-source
 
       - name: Upload unsigned firmware evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

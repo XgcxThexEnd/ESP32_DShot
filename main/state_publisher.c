@@ -1,6 +1,7 @@
 #include "state_publisher.h"
 
 #include <inttypes.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -22,7 +23,11 @@
 #define STATE_PUBLISHER_TASK_STACK    4096
 #define STATE_PUBLISHER_TASK_PRIORITY 5
 #define STATE_PUBLISHER_FULL_BIT      (UINT32_C(1) << 31)
+#define STATE_PUBLISHER_METRICS_HEALTH_BIT (UINT32_C(1) << 30)
+#define STATE_PUBLISHER_METADATA_BIT  (UINT32_C(1) << 29)
 #define STATE_PUBLISHER_FAN_MASK      ((UINT32_C(1) << APP_CONFIG_MAX_FANS) - 1U)
+#define STATE_PUBLISHER_HEALTH_PAYLOAD_CAPACITY 1536
+#define STATE_PUBLISHER_NODE_INFO_CAPACITY 1536
 
 static const char *TAG = "state_publisher";
 static portMUX_TYPE s_lifecycle_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -34,10 +39,162 @@ static bool s_start_started;
 static bool s_task_ready;
 static uint32_t s_pending_before_start;
 
+static void publish_metrics(void);
+static void publish_health_probe(void);
+
 static bool local_fan_valid(int local_fan)
 {
     return s_config.app_config && local_fan >= 0 &&
            local_fan < s_config.app_config->fan_count;
+}
+
+static bool is_utf8_continuation(unsigned char value)
+{
+    return value >= 0x80 && value <= 0xbf;
+}
+
+static size_t valid_utf8_sequence_length(const unsigned char *cursor)
+{
+    unsigned char first = cursor[0];
+    unsigned char second;
+    unsigned char third;
+    unsigned char fourth;
+
+    if (first >= 0xc2 && first <= 0xdf) {
+        second = cursor[1];
+        return is_utf8_continuation(second) ? 2 : 0;
+    }
+    if (first >= 0xe0 && first <= 0xef) {
+        second = cursor[1];
+        if (second == '\0') return 0;
+        third = cursor[2];
+        bool second_valid =
+            (first == 0xe0 && second >= 0xa0 && second <= 0xbf) ||
+            (first >= 0xe1 && first <= 0xec &&
+             is_utf8_continuation(second)) ||
+            (first == 0xed && second >= 0x80 && second <= 0x9f) ||
+            (first >= 0xee && first <= 0xef &&
+             is_utf8_continuation(second));
+        return second_valid && is_utf8_continuation(third) ? 3 : 0;
+    }
+    if (first >= 0xf0 && first <= 0xf4) {
+        second = cursor[1];
+        if (second == '\0') return 0;
+        third = cursor[2];
+        if (third == '\0') return 0;
+        fourth = cursor[3];
+        bool second_valid =
+            (first == 0xf0 && second >= 0x90 && second <= 0xbf) ||
+            (first >= 0xf1 && first <= 0xf3 &&
+             is_utf8_continuation(second)) ||
+            (first == 0xf4 && second >= 0x80 && second <= 0x8f);
+        return second_valid && is_utf8_continuation(third) &&
+                       is_utf8_continuation(fourth)
+                   ? 4
+                   : 0;
+    }
+    return 0;
+}
+
+static bool append_json_escaped(char *out, size_t out_size,
+                                size_t *position, const char *value)
+{
+    if (!out || !position || !value || *position >= out_size) return false;
+
+    static const char hex[] = "0123456789abcdef";
+    for (const unsigned char *cursor = (const unsigned char *)value;
+         *cursor != '\0'; ++cursor) {
+        char encoded[6];
+        const char *fragment = encoded;
+        size_t fragment_length = 1;
+
+        switch (*cursor) {
+        case '"':
+            fragment = "\\\"";
+            fragment_length = 2;
+            break;
+        case '\\':
+            fragment = "\\\\";
+            fragment_length = 2;
+            break;
+        case '\b':
+            fragment = "\\b";
+            fragment_length = 2;
+            break;
+        case '\f':
+            fragment = "\\f";
+            fragment_length = 2;
+            break;
+        case '\n':
+            fragment = "\\n";
+            fragment_length = 2;
+            break;
+        case '\r':
+            fragment = "\\r";
+            fragment_length = 2;
+            break;
+        case '\t':
+            fragment = "\\t";
+            fragment_length = 2;
+            break;
+        default:
+            if (*cursor < 0x20 || *cursor == 0x7f) {
+                encoded[0] = '\\';
+                encoded[1] = 'u';
+                encoded[2] = '0';
+                encoded[3] = '0';
+                encoded[4] = hex[*cursor >> 4];
+                encoded[5] = hex[*cursor & 0x0f];
+                fragment_length = sizeof(encoded);
+            } else if (*cursor >= 0x80) {
+                size_t sequence_length = valid_utf8_sequence_length(cursor);
+                if (sequence_length > 0) {
+                    fragment = (const char *)cursor;
+                    fragment_length = sequence_length;
+                    cursor += sequence_length - 1;
+                } else {
+                    /* Preserve valid JSON even if a producer supplied a
+                     * malformed UTF-8 byte sequence. */
+                    encoded[0] = '\\';
+                    encoded[1] = 'u';
+                    encoded[2] = '0';
+                    encoded[3] = '0';
+                    encoded[4] = hex[*cursor >> 4];
+                    encoded[5] = hex[*cursor & 0x0f];
+                    fragment_length = sizeof(encoded);
+                }
+            } else {
+                encoded[0] = (char)*cursor;
+            }
+            break;
+        }
+        if (fragment_length >= out_size - *position) {
+            out[*position] = '\0';
+            return false;
+        }
+        memcpy(out + *position, fragment, fragment_length);
+        *position += fragment_length;
+    }
+    out[*position] = '\0';
+    return true;
+}
+
+static bool append_bounded_format(char *out, size_t out_size,
+                                  size_t *position, const char *format, ...)
+{
+    if (!out || !position || !format || *position >= out_size) return false;
+
+    va_list arguments;
+    va_start(arguments, format);
+    int written = vsnprintf(out + *position, out_size - *position,
+                            format, arguments);
+    va_end(arguments);
+    if (written < 0 || (size_t)written >= out_size - *position) {
+        out[*position] = '\0';
+        return false;
+    }
+    *position += (size_t)written;
+    return true;
 }
 
 static void get_coordinator_health(
@@ -47,6 +204,8 @@ static void get_coordinator_health(
     memset(out_snapshot, 0, sizeof(*out_snapshot));
     snprintf(out_snapshot->boot_health, sizeof(out_snapshot->boot_health),
              "unknown");
+    snprintf(out_snapshot->last_stop_reason,
+             sizeof(out_snapshot->last_stop_reason), "unknown");
 
     /* The callback is deliberately outside every publisher critical section. */
     if (s_config.read_coordinator_health) {
@@ -54,6 +213,8 @@ static void get_coordinator_health(
                                          out_snapshot);
     }
     out_snapshot->boot_health[sizeof(out_snapshot->boot_health) - 1] = '\0';
+    out_snapshot->last_stop_reason[
+        sizeof(out_snapshot->last_stop_reason) - 1] = '\0';
 }
 
 static bool publish_fan_leaf(int fan_number, const char *leaf,
@@ -80,7 +241,9 @@ static bool publish_fan_leaf(int fan_number, const char *leaf,
 
 static void publish_discovery(void)
 {
-    char availability[MQTT_MANAGER_TOPIC_CAPACITY];
+    /* This function is invoked only by the publisher task. Persistent scratch
+     * space keeps the HA payload set out of that task's bounded stack. */
+    static char availability[MQTT_MANAGER_TOPIC_CAPACITY];
     if (!app_config_format_node_topic(availability, sizeof(availability),
                                       "status")) {
         return;
@@ -89,12 +252,12 @@ static void publish_discovery(void)
 #ifdef CONFIG_HOME_ASSISTANT_DISCOVERY_ENABLED
     for (int i = 0; i < s_config.app_config->fan_count; ++i) {
         int fan_number = s_config.app_config->fan_index_start + i;
-        char discovery[160];
-        char unique_id[96];
-        char command[MQTT_MANAGER_TOPIC_CAPACITY];
-        char state[MQTT_MANAGER_TOPIC_CAPACITY];
-        char pct_command[MQTT_MANAGER_TOPIC_CAPACITY];
-        char pct_state[MQTT_MANAGER_TOPIC_CAPACITY];
+        static char discovery[160];
+        static char unique_id[96];
+        static char command[MQTT_MANAGER_TOPIC_CAPACITY];
+        static char state[MQTT_MANAGER_TOPIC_CAPACITY];
+        static char pct_command[MQTT_MANAGER_TOPIC_CAPACITY];
+        static char pct_state[MQTT_MANAGER_TOPIC_CAPACITY];
         snprintf(discovery, sizeof(discovery),
                  "homeassistant/fan/%s_fan%d/config",
                  s_config.app_config->node_id, fan_number);
@@ -111,7 +274,7 @@ static void publish_discovery(void)
             continue;
         }
 
-        char payload[896];
+        static char payload[896];
         int written = snprintf(
             payload, sizeof(payload),
             "{\"name\":\"Tent Fan %d\",\"unique_id\":\"%s\","
@@ -129,9 +292,9 @@ static void publish_discovery(void)
         }
 
 #ifdef CONFIG_TACH_FEEDBACK_ENABLED
-        char sensor_discovery[176];
-        char rpm_topic[MQTT_MANAGER_TOPIC_CAPACITY];
-        char sensor_payload[640];
+        static char sensor_discovery[176];
+        static char rpm_topic[MQTT_MANAGER_TOPIC_CAPACITY];
+        static char sensor_payload[640];
         snprintf(sensor_discovery, sizeof(sensor_discovery),
                  "homeassistant/sensor/%s_fan%d_rpm/config",
                  s_config.app_config->node_id, fan_number);
@@ -175,48 +338,77 @@ static void publish_node_metadata(void)
     fan_state_store_health_t store = fan_state_store_health_snapshot();
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
-    char node_info[512];
-    int info_len = snprintf(
-        node_info, sizeof(node_info),
-        "{\"node\":\"%s\",\"fan_start\":%d,\"fan_count\":%d,"
-        "\"project\":\"%s\",\"app_version\":\"%s\","
-        "\"idf_version\":\"%s\",\"partition\":\"%s\","
-        "\"reset_reason\":%d,\"boot_health\":\"%s\","
-        "\"nvs_erased_on_boot\":%s,\"nvs_erase_observed\":%s,"
-        "\"schedules\":%d,\"ota\":%d,\"legacy_topics\":%d,"
-        "\"home_assistant_discovery\":%d}",
-        s_config.app_config->node_id,
-        s_config.app_config->fan_index_start,
-        s_config.app_config->fan_count,
-        app ? app->project_name : "unknown",
-        app ? app->version : "unknown",
-        app ? app->idf_ver : IDF_VER,
-        (running && running->label[0]) ? running->label : "unknown",
-        (int)esp_reset_reason(), coordinator.boot_health,
-        store.erased_on_boot ? "true" : "false",
-        store.erase_observed ? "true" : "false",
+    const char *project_name = app ? app->project_name : "unknown";
+    const char *app_version = app ? app->version : "unknown";
+    const char *idf_version = app ? app->idf_ver : IDF_VER;
+    const char *partition =
+        (running && running->label[0]) ? running->label : "unknown";
 #ifdef CONFIG_SCHEDULE_ENABLED
-        CONFIG_SCHEDULE_SLOTS,
+    const int schedule_slots = CONFIG_SCHEDULE_SLOTS;
 #else
-        0,
+    const int schedule_slots = 0;
 #endif
 #ifdef CONFIG_OTA_ENABLED
-        1,
+    const int ota_enabled = 1;
 #else
-        0,
+    const int ota_enabled = 0;
 #endif
 #ifdef CONFIG_MQTT_LEGACY_TOPICS
-        1,
+    const int legacy_topics = 1;
 #else
-        0,
+    const int legacy_topics = 0;
 #endif
 #ifdef CONFIG_HOME_ASSISTANT_DISCOVERY_ENABLED
-        1
+    const int discovery_enabled = 1;
 #else
-        0
+    const int discovery_enabled = 0;
 #endif
-    );
-    if (info_len > 0 && (size_t)info_len < sizeof(node_info)) {
+
+    /* App-description fields can originate in release metadata (including a
+     * Git-derived version), so every JSON string is escaped rather than
+     * interpolated directly. Only the publisher task calls this function. */
+    static char node_info[STATE_PUBLISHER_NODE_INFO_CAPACITY];
+    size_t info_position = 0;
+    bool info_valid = append_bounded_format(
+        node_info, sizeof(node_info), &info_position, "{\"node\":\"") &&
+        append_json_escaped(node_info, sizeof(node_info), &info_position,
+                            s_config.app_config->node_id) &&
+        append_bounded_format(
+            node_info, sizeof(node_info), &info_position,
+            "\",\"fan_start\":%d,\"fan_count\":%d,"
+            "\"topology_fingerprint\":\"%016" PRIx64 "\","
+            "\"project\":\"",
+            s_config.app_config->fan_index_start,
+            s_config.app_config->fan_count,
+            s_config.app_config->topology_fingerprint) &&
+        append_json_escaped(node_info, sizeof(node_info), &info_position,
+                            project_name) &&
+        append_bounded_format(node_info, sizeof(node_info), &info_position,
+                              "\",\"app_version\":\"") &&
+        append_json_escaped(node_info, sizeof(node_info), &info_position,
+                            app_version) &&
+        append_bounded_format(node_info, sizeof(node_info), &info_position,
+                              "\",\"idf_version\":\"") &&
+        append_json_escaped(node_info, sizeof(node_info), &info_position,
+                            idf_version) &&
+        append_bounded_format(node_info, sizeof(node_info), &info_position,
+                              "\",\"partition\":\"") &&
+        append_json_escaped(node_info, sizeof(node_info), &info_position,
+                            partition) &&
+        append_bounded_format(node_info, sizeof(node_info), &info_position,
+                              "\",\"reset_reason\":%d,\"boot_health\":\"",
+                              (int)esp_reset_reason()) &&
+        append_json_escaped(node_info, sizeof(node_info), &info_position,
+                            coordinator.boot_health) &&
+        append_bounded_format(
+            node_info, sizeof(node_info), &info_position,
+            "\",\"nvs_erased_on_boot\":%s,\"nvs_erase_observed\":%s,"
+            "\"schedules\":%d,\"ota\":%d,\"legacy_topics\":%d,"
+            "\"home_assistant_discovery\":%d}",
+            store.erased_on_boot ? "true" : "false",
+            store.erase_observed ? "true" : "false", schedule_slots,
+            ota_enabled, legacy_topics, discovery_enabled);
+    if (info_valid) {
         (void)mqtt_manager_publish(info_topic, node_info, 1, true);
     } else {
         ESP_LOGE(TAG, "Node metadata exceeded its bounded payload buffer");
@@ -317,6 +509,14 @@ static void state_publisher_task(void *argument)
                 publish_one_state(i, full_retained ? 1 : 0, full_retained);
             }
         }
+        if ((bits & STATE_PUBLISHER_METADATA_BIT) != 0) {
+            publish_discovery();
+            publish_node_metadata();
+        }
+        if ((bits & STATE_PUBLISHER_METRICS_HEALTH_BIT) != 0) {
+            publish_metrics();
+            publish_health_probe();
+        }
     }
 }
 
@@ -362,7 +562,9 @@ static void publish_health_probe(void)
                 now > mqtt.oldest_command_since_us
             ? (now - mqtt.oldest_command_since_us) / 1000
             : 0;
-    char payload[1152];
+    /* Only the publisher task calls this function, so one static buffer avoids
+     * placing a 1.5 KiB object on either the publisher or app-main stack. */
+    static char payload[STATE_PUBLISHER_HEALTH_PAYLOAD_CAPACITY];
     int written = snprintf(
         payload, sizeof(payload),
         "{\"uptime_ms\":%" PRIi64 ",\"free_heap\":%" PRIu32 ","
@@ -377,15 +579,19 @@ static void publish_health_probe(void)
         "\"mqtt_dispatch_stack_words\":%" PRIu32 ","
         "\"wifi_degraded\":%s,\"wifi_disconnects\":%" PRIu32 ","
         "\"nvs_erased_on_boot\":%s,\"nvs_erase_observed\":%s,"
-        "\"interlock_enabled\":%s,\"comm_failsafe\":%s,"
-        "\"global_safety_latched\":%s,\"ramp_stack_words\":%u,"
+        "\"interlock_configured\":%s,\"interlock_enabled\":%s,"
+        "\"comm_failsafe\":%s,"
+        "\"global_safety_latched\":%s,\"stop_in_progress\":%s,"
+        "\"publisher_stack_words\":%u,\"ramp_stack_words\":%u,"
         "\"supervisor_stack_words\":%u,\"ramp_liveness_fault\":%s,"
         "\"scheduler_liveness_fault\":%s,\"tach_liveness_fault\":%s,"
         "\"tach_action_ready\":%s,\"tach_action_pending\":%s,"
         "\"tach_action_age_ms\":%" PRIi64 ","
         "\"tach_action_stack_words\":%" PRIu32 ","
         "\"mqtt_command_overflow_fault\":%s,"
-        "\"mqtt_dispatch_liveness_fault\":%s}",
+        "\"mqtt_dispatch_liveness_fault\":%s,"
+        "\"stop_count\":%" PRIu32 ",\"last_stop_result\":%d,"
+        "\"last_stop_reason\":\"",
         now / 1000, esp_get_free_heap_size(), esp_get_minimum_free_heap_size(),
         mqtt.ready ? "true" : "false",
         mqtt.last_ack_us > 0 ? (now - mqtt.last_ack_us) / 1000 : -1,
@@ -398,9 +604,12 @@ static void publish_health_probe(void)
         wifi.degraded ? "true" : "false", wifi.disconnect_count,
         store.erased_on_boot ? "true" : "false",
         store.erase_observed ? "true" : "false",
+        coordinator.interlock_configured ? "true" : "false",
         coordinator.interlock_enabled ? "true" : "false",
         coordinator.communication_failsafe_active ? "true" : "false",
         coordinator.global_safety_latched ? "true" : "false",
+        coordinator.stop_in_progress ? "true" : "false",
+        (unsigned)state_publisher_stack_high_water_mark(),
         (unsigned)motor_control_ramp_stack_words(),
         (unsigned)coordinator.supervisor_stack_words,
         coordinator.ramp_liveness_fault ? "true" : "false",
@@ -411,8 +620,24 @@ static void publish_health_probe(void)
         coordinator.tach_action_age_ms,
         coordinator.tach_action_stack_words,
         coordinator.mqtt_command_overflow_fault ? "true" : "false",
-        coordinator.mqtt_dispatch_liveness_fault ? "true" : "false");
-    if (written > 0 && (size_t)written < sizeof(payload)) {
+        coordinator.mqtt_dispatch_liveness_fault ? "true" : "false",
+        coordinator.stop_count, (int)coordinator.last_stop_result);
+    if (written <= 0 || (size_t)written >= sizeof(payload)) {
+        ESP_LOGE(TAG, "Health payload exceeded its bounded buffer");
+        return;
+    }
+
+    size_t position = (size_t)written;
+    if (!append_json_escaped(payload, sizeof(payload), &position,
+                             coordinator.last_stop_reason)) {
+        ESP_LOGE(TAG, "Escaped stop reason exceeded the health payload buffer");
+        return;
+    }
+    written = snprintf(
+        payload + position, sizeof(payload) - position,
+        "\",\"topology_fingerprint\":\"%016" PRIx64 "\"}",
+        s_config.app_config->topology_fingerprint);
+    if (written > 0 && (size_t)written < sizeof(payload) - position) {
         /* QoS-1 PUBACK is the recurring broker round-trip proof for the lease. */
         (void)mqtt_manager_publish(topic, payload, 1, false);
     } else {
@@ -517,18 +742,26 @@ void state_publisher_request_all(void)
     }
 }
 
-void state_publisher_publish_discovery_and_metadata(void)
+void state_publisher_request_discovery_and_metadata(void)
 {
     if (!s_initialized) return;
-    publish_discovery();
-    publish_node_metadata();
+    portENTER_CRITICAL(&s_lifecycle_lock);
+    TaskHandle_t task = s_task;
+    if (!task) s_pending_before_start |= STATE_PUBLISHER_METADATA_BIT;
+    portEXIT_CRITICAL(&s_lifecycle_lock);
+    if (task) (void)xTaskNotify(task, STATE_PUBLISHER_METADATA_BIT, eSetBits);
 }
 
-void state_publisher_publish_periodic_metrics_health(void)
+void state_publisher_request_periodic_metrics_health(void)
 {
     if (!s_initialized) return;
-    publish_metrics();
-    publish_health_probe();
+    portENTER_CRITICAL(&s_lifecycle_lock);
+    TaskHandle_t task = s_task;
+    if (!task) s_pending_before_start |= STATE_PUBLISHER_METRICS_HEALTH_BIT;
+    portEXIT_CRITICAL(&s_lifecycle_lock);
+    if (task) {
+        (void)xTaskNotify(task, STATE_PUBLISHER_METRICS_HEALTH_BIT, eSetBits);
+    }
 }
 
 bool state_publisher_publish_manual_ack(int local_fan,
