@@ -112,7 +112,7 @@ static esp_err_t save_now(void)
         .length = sizeof(fan_state_blob_t),
         .topology_fingerprint = s_config.app_config->topology_fingerprint,
         .fan_index_start = s_config.app_config->fan_index_start,
-        .fan_count = s_config.app_config->fan_count,
+        .fan_count = (uint8_t)s_config.app_config->fan_count,
     };
     if (!s_config.snapshot_targets(
             s_config.callback_context, state.targets,
@@ -284,7 +284,7 @@ esp_err_t fan_state_store_save_sync(TickType_t timeout_ticks)
 
     esp_err_t result = ESP_ERR_INVALID_STATE;
     TaskHandle_t save_task_handle;
-    uint32_t generation;
+    uint32_t generation = 0;
     portENTER_CRITICAL(&s_lock);
     save_task_handle = s_save_task;
     if (s_initialized && save_task_handle &&
@@ -448,10 +448,10 @@ fan_state_store_health_t fan_state_store_health_snapshot(void)
         .save_task_ready = s_save_task_ready,
         .erased_on_boot = s_erased_on_boot,
         .erase_observed = s_erase_observed,
-        .save_task_stack_words = 0,
+        .save_task_stack_bytes = 0,
     };
     task = s_save_task;
     portEXIT_CRITICAL(&s_lock);
-    if (task) snapshot.save_task_stack_words = uxTaskGetStackHighWaterMark(task);
+    if (task) snapshot.save_task_stack_bytes = uxTaskGetStackHighWaterMark(task);
     return snapshot;
 }

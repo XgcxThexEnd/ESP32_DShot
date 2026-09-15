@@ -33,10 +33,10 @@ typedef struct {
     bool tach_action_ready;
     bool tach_action_pending;
     int64_t tach_action_age_ms;
-    uint32_t tach_action_stack_words;
+    uint32_t tach_action_stack_bytes;
     bool mqtt_command_overflow_fault;
     bool mqtt_dispatch_liveness_fault;
-    UBaseType_t supervisor_stack_words;
+    UBaseType_t supervisor_stack_bytes;
     uint32_t stop_count;
     esp_err_t last_stop_result;
     char last_stop_reason[STATE_PUBLISHER_STOP_REASON_CAPACITY];
@@ -95,7 +95,7 @@ bool state_publisher_publish_ota_status(const char *status, bool retain);
 /** State-task readiness used by the local boot-health window. */
 bool state_publisher_is_ready(void);
 
-/** State-task stack high-water mark in FreeRTOS words, or zero if stopped. */
+/** State-task stack high-water mark in bytes, or zero if stopped. */
 UBaseType_t state_publisher_stack_high_water_mark(void);
 
 #ifdef __cplusplus

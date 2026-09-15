@@ -60,8 +60,10 @@ owned by focused modules instead of shared controller globals:
 | `wifi_manager.c` | station events, reconnect backoff, IP state, and SNTP |
 | `mqtt_manager.c` | client lifecycle, subscriptions, bounded RX dispatch, session commit fencing, and ACK health |
 | `command_router.c` | side-effect-free MQTT topic/payload validation and typed commands |
+| `command_executor.c` | typed command execution, session authorization, and output transaction ordering |
 | `motor_control.c` | DShot/RMT channels, zero stream, ramping, targets, and motor inhibits |
 | `tach_monitor.c` | PCNT sampling, RPM, debounce, fault generations, and stall latches |
+| `tach_actions.c` | supervised fault-stop worker and serialized tach alarm clearing |
 | `scheduler.c` | schedule state, runtime activation, topology-gated NVS persistence, and bounded commit ACKs |
 | `fan_state_store.c` | topology-gated manual-target persistence and all-zero-only legacy migration |
 | `ota_manager.c` | singleton verified-HTTPS update lifecycle |
@@ -85,8 +87,9 @@ left pending.
 ## Requirements and wiring
 
 - ESP32-S3 development board.
-- ESP-IDF 5.3 or newer. The current dependency lock was generated with ESP-IDF
-  6.1.
+- ESP-IDF 6.1.0 for ESP32-S3 releases. `configs/release-target.json` binds the
+  dependency lock and CI builder image to this target. Builds with other SDKs
+  are compatibility checks and must not replace the committed release lock.
 - DShot600-compatible ESCs and an appropriately rated external motor supply.
 - MQTT broker; Home Assistant is optional.
 
@@ -190,14 +193,27 @@ Requested and applied values can differ while ramping, after minimum-spin
 clamping, or when a safety policy rejects/stops output. Treat applied state as
 electrical output confirmation, not proof of mechanical rotation.
 
-With `TACH_FEEDBACK_ENABLED`, `P/fanN/measured_rpm` is published only after a
-valid PCNT sample, `P/fanN/alarm` reports the tach stall alarm, and publishing
+With `TACH_FEEDBACK_ENABLED`, `P/fanN/measured_rpm` is published only for a
+valid PCNT sample no older than `TACH_SAMPLE_MS + 500` milliseconds. At the next
+publication, an invalid or stale sample clears the retained RPM value and sets
+retained `P/fanN/rpm_status` to `offline`; recovery sets it to `online`.
+`P/fanN/tach_valid` and `P/fanN/tach_sample_age_ms` expose validity and age
+(`-1` before a sample exists). Home Assistant RPM discovery requires both node
+and RPM availability. After a counter read error, the first successful read
+establishes a new baseline; RPM resumes on the following complete interval.
+`P/fanN/alarm` reports the tach stall alarm, and publishing
 exact `CLEAR` to `P/fanN/alarm/clear` clears the latch. Configure pulse count,
 startup grace, threshold, debounce, and action for the actual fan. The node
 publishes retained availability at `P/status`. When
 `HOME_ASSISTANT_DISCOVERY_ENABLED` is selected, retained discovery is published
 to exact `homeassistant/fan/<NODE_ID>_fanN/config` topics and, with tach enabled,
 `homeassistant/sensor/<NODE_ID>_fanN_rpm/config` topics.
+
+Health JSON uses `*_stack_bytes` for ESP-IDF stack high-water marks. Update
+dashboards that read the former `*_stack_words` keys; the numeric values are
+unchanged because ESP-IDF already reports bytes. `mqtt_rx_age_ms` is diagnostic
+receive activity. Only accepted SUBACKs, PUBACKs, and the explicit startup
+baseline renew `mqtt_ack_age_ms`; incoming commands do not extend that lease.
 
 ### One-fan multi-node deployments
 
@@ -267,8 +283,13 @@ OTA is disabled by default. When enabled, publishing a non-retained firmware URL
 to `P/ota/update` starts an update only when the URL begins with the configured
 `OTA_ALLOWED_URL_PREFIX` and contains no ambiguous encoded/dot path segments.
 The prefix must start with `https://` and end with `/`; TLS uses ESP-IDF's public
-CA bundle, certificate dates are checked after SNTP sync, and redirects are
-disabled. Before download, the controller inhibits schedules, deasserts motion,
+CA bundle, certificate dates are checked after SNTP sync, and only HTTP 200
+responses are accepted; redirects are rejected before writing flash. Network
+operations have a 10-second idle timeout and the transfer has a five-minute
+deadline, including slow header/body delivery. Initial DNS resolution also
+depends on the SDK's bounded resolver timeout. A failed or timed-out download
+releases the update operation so fresh commands can be accepted again.
+Before download, the controller inhibits schedules, deasserts motion,
 requires every motor to stop, and synchronously commits both the schedule
 inhibit and the latest restorable fan targets. The safety-owned schedule
 inhibit cannot be cleared for the rest of that boot, even when the download
@@ -303,6 +324,18 @@ Run offline unit tests with:
 ```bash
 python -m pytest
 ```
+
+Host C tests also exercise scheduler safety races, schedule persistence,
+OTA redirect rejection, incomplete/invalid images, and transport deadlines
+using deterministic task, flash, and network substitutes:
+
+```bash
+python scripts/run_host_policy_tests.py --sanitize
+```
+
+On Windows, run from a Visual Studio developer shell with `--cc cl` and omit
+`--sanitize`. These tests execute the production scheduler and OTA modules;
+hardware validation is still required.
 
 The offline suite includes synthetic edge-capture tests for the standalone
 DShot600 waveform validator. Before connecting a motor, export a logic-analyzer

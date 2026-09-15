@@ -12,9 +12,9 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 6.1.0
+    version: 5.5.0
 direct_dependencies:
 - espressif/mqtt
 manifest_hash: 7dcb35ce0b9dd85c4431f2ddb84961f9f34b6e68c1e591e598980c27edca73dd
 target: esp32s3
-version: 3.0.0
+version: 2.0.0

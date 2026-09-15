@@ -78,7 +78,7 @@ typedef struct {
     int fan_count;
     int initialized_fan_count;
     int64_t ramp_heartbeat_us;
-    uint32_t ramp_stack_words;
+    uint32_t ramp_stack_bytes;
     motor_control_fan_snapshot_t fans[MOTOR_CONTROL_MAX_FANS];
 } motor_control_health_snapshot_t;
 
@@ -172,7 +172,7 @@ bool motor_control_get_health_snapshot(motor_control_health_snapshot_t *out);
 bool motor_control_holds_safe_zero(void);
 
 int64_t motor_control_ramp_heartbeat_us(void);
-uint32_t motor_control_ramp_stack_words(void);
+uint32_t motor_control_ramp_stack_bytes(void);
 
 #ifdef __cplusplus
 }

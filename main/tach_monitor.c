@@ -27,6 +27,7 @@ typedef struct {
     bool unit_enabled;
     bool unit_started;
     int previous_pulse_count;
+    bool pulse_baseline_valid;
     uint32_t measured_rpm;
     bool measurement_valid;
     bool stall_alarm;
@@ -146,12 +147,14 @@ static esp_err_t read_pulse_delta(tach_fan_state_t *fan,
     // be discarded. Reset only well before the signed accumulator limit, with
     // the unit stopped so the final pre-reset count is stable.
     if (!fan->unit_started) {
+        fan->pulse_baseline_valid = false;
         esp_err_t clear_err = pcnt_unit_clear_count(fan->unit);
         if (clear_err != ESP_OK) return clear_err;
         fan->previous_pulse_count = 0;
         esp_err_t start_err = pcnt_unit_start(fan->unit);
         if (start_err != ESP_OK) return start_err;
         fan->unit_started = true;
+        fan->pulse_baseline_valid = false;
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -159,11 +162,15 @@ static esp_err_t read_pulse_delta(tach_fan_state_t *fan,
         fan->previous_pulse_count >= TACH_COUNTER_RESET_THRESHOLD;
     if (reset_after_read) {
         esp_err_t stop_err = pcnt_unit_stop(fan->unit);
-        if (stop_err != ESP_OK) return stop_err;
+        if (stop_err != ESP_OK) {
+            fan->pulse_baseline_valid = false;
+            return stop_err;
+        }
         fan->unit_started = false;
     }
 
     int cumulative_pulses = 0;
+    const bool baseline_valid = fan->pulse_baseline_valid;
     esp_err_t count_err = pcnt_unit_get_count(fan->unit, &cumulative_pulses);
     bool delta_valid = count_err == ESP_OK &&
                        cumulative_pulses >= fan->previous_pulse_count;
@@ -173,9 +180,15 @@ static esp_err_t read_pulse_delta(tach_fan_state_t *fan,
                                : 0;
 
     if (!reset_after_read) {
-        if (count_err != ESP_OK) return count_err;
-        if (!delta_valid) return ESP_ERR_INVALID_STATE;
+        if (count_err != ESP_OK) {
+            fan->pulse_baseline_valid = false;
+            return count_err;
+        }
         fan->previous_pulse_count = cumulative_pulses;
+        fan->pulse_baseline_valid = cumulative_pulses >= 0;
+        // A failed read spans an unknown interval. Rebase the first recovery
+        // sample rather than reporting several intervals of pulses as one.
+        if (!baseline_valid || !delta_valid) return ESP_ERR_INVALID_STATE;
         *out_pulse_delta = pulse_delta;
         return ESP_OK;
     }
@@ -190,9 +203,11 @@ static esp_err_t read_pulse_delta(tach_fan_state_t *fan,
     }
     esp_err_t start_err = pcnt_unit_start(fan->unit);
     if (start_err == ESP_OK) fan->unit_started = true;
+    fan->pulse_baseline_valid = count_err == ESP_OK && delta_valid &&
+                               clear_err == ESP_OK && start_err == ESP_OK;
 
     if (count_err != ESP_OK) return count_err;
-    if (!delta_valid) return ESP_ERR_INVALID_STATE;
+    if (!baseline_valid || !delta_valid) return ESP_ERR_INVALID_STATE;
     if (clear_err != ESP_OK) return clear_err;
     if (start_err != ESP_OK) return start_err;
     *out_pulse_delta = pulse_delta;

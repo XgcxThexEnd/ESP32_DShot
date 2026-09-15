@@ -73,6 +73,9 @@ fan.
 | `<node>/fanN/requested_percentage` | requested manual/schedule target | can differ from applied output |
 | `<node>/fanN/applied_percentage` | active RMT percentage | not proof of mechanical rotation |
 | `<node>/fanN/measured_rpm` | valid independent tach sample | present only when tach feedback is enabled/wired |
+| `<node>/fanN/rpm_status` | `online` / `offline` | retained; invalid or stale samples also clear retained RPM |
+| `<node>/fanN/tach_valid` | `1` / `0` | validity at publication time |
+| `<node>/fanN/tach_sample_age_ms` | sample age, or `-1` | freshness threshold is configured sample interval plus 500 ms |
 | `<node>/fanN/rmt_refresh_count` and error metrics | RMT activity/failures | positive refresh change is not proof the fan rotates |
 | `<node>/health` | heap, MQTT ACK/outbox, Wi-Fi, configured/active interlock state, fail-safe, completed-stop tuple, stacks, topology | alert thresholds are deployment-specific; `stop_in_progress` distinguishes active work from the last completed result |
 | `<node>/info` | app/IDF version, partition, reset reason, boot health, flags, topology fingerprint | add artifact digest/config revision in external inventory |

@@ -163,7 +163,13 @@ while testing:
 - repeated power cycles during zero, ramp-up, steady output, and ramp-down;
 - NVS erase/migration reporting and a full NVS condition on a disposable test
   image;
-- a valid OTA, loss of network during download, and forced rollback of a
+- a valid OTA, rejected HTTP redirects (including another HTTPS host and an
+  out-of-prefix path), a server that stalls before or during the image body,
+  and slow header/body delivery exceeding the five-minute transfer deadline;
+  failures must release the OTA claim, leave the boot partition unchanged, and
+  permit fresh manual commands while preserving the safety-owned schedule
+  inhibit;
+- loss of network during download and forced rollback of a
   deliberately unhealthy pending image.
 
 OTA, signing, Secure Boot, flash encryption, and eFuse exercises must follow
