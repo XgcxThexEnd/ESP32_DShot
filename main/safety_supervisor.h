@@ -44,7 +44,7 @@ typedef struct {
     int64_t heartbeat_us;
     /** Oldest queued or in-flight confirmed-fault action; zero when idle. */
     int64_t oldest_action_since_us;
-    uint32_t stack_words;
+    uint32_t stack_bytes;
 } safety_supervisor_tach_action_health_t;
 
 typedef bool (*safety_supervisor_read_tach_action_health_fn)(
@@ -76,12 +76,12 @@ typedef struct {
     bool tach_action_ready;
     bool tach_action_pending;
     int64_t tach_action_age_ms;
-    uint32_t tach_action_stack_words;
+    uint32_t tach_action_stack_bytes;
     bool mqtt_command_overflow_fault;
     bool mqtt_dispatch_liveness_fault;
     safety_boot_health_t boot_health;
     int64_t heartbeat_us;
-    uint32_t stack_words;
+    uint32_t stack_bytes;
     uint32_t stop_count;
     esp_err_t last_stop_result;
     char last_stop_reason[SAFETY_SUPERVISOR_REASON_CAPACITY];
@@ -153,7 +153,7 @@ const char *safety_supervisor_boot_health_name(safety_boot_health_t health);
 
 safety_supervisor_health_t safety_supervisor_health_snapshot(void);
 int64_t safety_supervisor_heartbeat_us(void);
-uint32_t safety_supervisor_stack_words(void);
+uint32_t safety_supervisor_stack_bytes(void);
 
 #ifdef __cplusplus
 }

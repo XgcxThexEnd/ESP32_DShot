@@ -13,19 +13,16 @@
 #include <string.h>
 
 #include "controller_policy.h"
-#include "esp_crt_bundle.h"
 #include "esp_err.h"
-#include "esp_http_client.h"
-#include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "ota_download.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #define OTA_MANAGER_TASK_STACK_SIZE 8192
 #define OTA_MANAGER_TASK_PRIORITY 5
 #define OTA_MANAGER_TASK_CORE 0
-#define OTA_MANAGER_HTTP_TIMEOUT_MS 10000
 #define OTA_MANAGER_REBOOT_STATUS_GRACE_MS 1000
 
 static const char *TAG = "ota_manager";
@@ -230,17 +227,7 @@ static void ota_manager_task(void *arg)
     (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     ESP_LOGI(TAG, "Starting verified HTTPS OTA download");
-    esp_http_client_config_t http_config = {
-        .url = url,
-        .timeout_ms = OTA_MANAGER_HTTP_TIMEOUT_MS,
-        .disable_auto_redirect = true,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-    };
-    esp_https_ota_config_t ota_config = {
-        .http_config = &http_config,
-    };
-
-    esp_err_t err = esp_https_ota(&ota_config);
+    esp_err_t err = ota_download_verified(url);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "OTA successful, rebooting...");
         publish_status("downloaded_rebooting", true);

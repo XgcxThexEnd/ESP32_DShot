@@ -1,0 +1,51 @@
+name: Release hardware evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      evidence_run_id:
+        description: Workflow run in this repository containing the hil-evidence artifact
+        required: true
+        type: string
+      firmware_commit:
+        description: Full commit SHA of the firmware tested on hardware
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  hardware-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out validation tools
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Download completed evidence from this repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+        run: |
+          [[ "$EVIDENCE_RUN_ID" =~ ^[0-9]+$ ]]
+          gh run download "$EVIDENCE_RUN_ID" --name hil-evidence --dir hil-submitted
+      - name: Validate complete evidence, files, hashes, and firmware identity
+        env:
+          EXPECTED_COMMIT: ${{ inputs.firmware_commit }}
+        run: |
+          python scripts/validate_hil_evidence.py hil-submitted/evidence-manifest.json
+          python - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          release = json.loads(Path('hil-submitted/evidence-manifest.json').read_text())['release']
+          expected = os.environ['EXPECTED_COMMIT']
+          if not re.fullmatch(r'[0-9a-f]{40}', expected) or release['firmware_commit'] != expected:
+              raise SystemExit('Evidence does not match the requested firmware commit')
+          contract = json.loads(Path('configs/release-target.json').read_text())
+          version = release['esp_idf_version'].removeprefix('v')
+          if version not in (contract['esp_idf_version'], contract['esp_idf_version'].removesuffix('.0')):
+              raise SystemExit('Hardware evidence uses a different release SDK')
+          print('Hardware evidence accepted for', expected)
+          PY

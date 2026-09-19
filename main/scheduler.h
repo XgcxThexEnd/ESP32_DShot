@@ -91,8 +91,8 @@ typedef struct {
     bool save_task_ready;
     bool inhibited;
     int64_t heartbeat_us;
-    UBaseType_t scheduler_task_stack_words;
-    UBaseType_t save_task_stack_words;
+    UBaseType_t scheduler_task_stack_bytes;
+    UBaseType_t save_task_stack_bytes;
 } scheduler_health_snapshot_t;
 
 /**

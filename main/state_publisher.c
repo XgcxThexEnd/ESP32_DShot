@@ -294,21 +294,25 @@ static void publish_discovery(void)
 #ifdef CONFIG_TACH_FEEDBACK_ENABLED
         static char sensor_discovery[176];
         static char rpm_topic[MQTT_MANAGER_TOPIC_CAPACITY];
-        static char sensor_payload[640];
+        static char rpm_availability[MQTT_MANAGER_TOPIC_CAPACITY];
+        static char sensor_payload[896];
         snprintf(sensor_discovery, sizeof(sensor_discovery),
                  "homeassistant/sensor/%s_fan%d_rpm/config",
                  s_config.app_config->node_id, fan_number);
         if (app_config_format_node_topic(rpm_topic, sizeof(rpm_topic),
-                                         "fan%d/measured_rpm", fan_number)) {
+                                         "fan%d/measured_rpm", fan_number) &&
+            app_config_format_node_topic(rpm_availability, sizeof(rpm_availability),
+                                         "fan%d/rpm_status", fan_number)) {
             written = snprintf(
                 sensor_payload, sizeof(sensor_payload),
                 "{\"name\":\"Tent Fan %d RPM\","
                 "\"unique_id\":\"%s_fan%d_rpm\","
                 "\"state_topic\":\"%s\","
                 "\"unit_of_measurement\":\"rpm\","
-                "\"availability_topic\":\"%s\"}",
+                "\"availability_mode\":\"all\","
+                "\"availability\":[{\"topic\":\"%s\"},{\"topic\":\"%s\"}]}",
                 fan_number, s_config.app_config->node_id, fan_number,
-                rpm_topic, availability);
+                rpm_topic, availability, rpm_availability);
             if (written > 0 && (size_t)written < sizeof(sensor_payload)) {
                 (void)mqtt_manager_publish(sensor_discovery, sensor_payload, 1,
                                            true);
@@ -468,11 +472,27 @@ static void publish_one_state(int local_fan, int qos, bool retain)
 #ifdef CONFIG_TACH_FEEDBACK_ENABLED
     tach_monitor_snapshot_t tach;
     if (tach_monitor_get_snapshot(local_fan, &tach) == ESP_OK) {
-        if (tach.measurement_valid) {
+        int64_t now = esp_timer_get_time();
+        int64_t age_ms = tach.sampled_at_us > 0 && now >= tach.sampled_at_us
+                             ? (now - tach.sampled_at_us) / 1000 : -1;
+        bool fresh = tach.measurement_valid && age_ms >= 0 &&
+                     age_ms <= CONFIG_TACH_SAMPLE_MS + 500;
+        (void)publish_fan_leaf(fan_number, "rpm_status",
+                               fresh ? "online" : "offline", 1, true, false);
+        (void)publish_fan_leaf(fan_number, "tach_valid", fresh ? "1" : "0",
+                               qos, retain, false);
+        (void)snprintf(value, sizeof(value), "%" PRIi64, age_ms);
+        (void)publish_fan_leaf(fan_number, "tach_sample_age_ms", value,
+                               qos, retain, false);
+        if (fresh) {
             (void)snprintf(value, sizeof(value), "%" PRIu32,
                            tach.measured_rpm);
             (void)publish_fan_leaf(fan_number, "measured_rpm", value, qos,
-                                   retain, false);
+                                    retain, false);
+        } else {
+            // Remove the broker's retained measurement as well as marking the
+            // entity unavailable; new consumers must not receive stale RPM.
+            (void)publish_fan_leaf(fan_number, "measured_rpm", "", 1, true, false);
         }
         (void)publish_fan_leaf(fan_number, "alarm",
                                tach.stall_alarm ? "ON" : "OFF", qos, retain,
@@ -570,24 +590,25 @@ static void publish_health_probe(void)
         "{\"uptime_ms\":%" PRIi64 ",\"free_heap\":%" PRIu32 ","
         "\"minimum_free_heap\":%" PRIu32 ",\"mqtt_ready\":%s,"
         "\"mqtt_ack_age_ms\":%" PRIi64 ",\"mqtt_pubacks\":%" PRIu32 ","
+        "\"mqtt_rx_age_ms\":%" PRIi64 ","
         "\"mqtt_subacks\":%" PRIu32 ",\"mqtt_connects\":%" PRIu32 ","
         "\"mqtt_publish_failures\":%" PRIu32 ",\"mqtt_outbox_bytes\":%d,"
         "\"mqtt_command_queue_drops\":%" PRIu32 ","
         "\"mqtt_pending_commands\":%u,"
         "\"mqtt_dispatch_ready\":%s,\"mqtt_command_in_flight\":%s,"
         "\"mqtt_dispatch_age_ms\":%" PRIi64 ","
-        "\"mqtt_dispatch_stack_words\":%" PRIu32 ","
+        "\"mqtt_dispatch_stack_bytes\":%" PRIu32 ","
         "\"wifi_degraded\":%s,\"wifi_disconnects\":%" PRIu32 ","
         "\"nvs_erased_on_boot\":%s,\"nvs_erase_observed\":%s,"
         "\"interlock_configured\":%s,\"interlock_enabled\":%s,"
         "\"comm_failsafe\":%s,"
         "\"global_safety_latched\":%s,\"stop_in_progress\":%s,"
-        "\"publisher_stack_words\":%u,\"ramp_stack_words\":%u,"
-        "\"supervisor_stack_words\":%u,\"ramp_liveness_fault\":%s,"
+        "\"publisher_stack_bytes\":%u,\"ramp_stack_bytes\":%u,"
+        "\"supervisor_stack_bytes\":%u,\"ramp_liveness_fault\":%s,"
         "\"scheduler_liveness_fault\":%s,\"tach_liveness_fault\":%s,"
         "\"tach_action_ready\":%s,\"tach_action_pending\":%s,"
         "\"tach_action_age_ms\":%" PRIi64 ","
-        "\"tach_action_stack_words\":%" PRIu32 ","
+        "\"tach_action_stack_bytes\":%" PRIu32 ","
         "\"mqtt_command_overflow_fault\":%s,"
         "\"mqtt_dispatch_liveness_fault\":%s,"
         "\"stop_count\":%" PRIu32 ",\"last_stop_result\":%d,"
@@ -595,12 +616,14 @@ static void publish_health_probe(void)
         now / 1000, esp_get_free_heap_size(), esp_get_minimum_free_heap_size(),
         mqtt.ready ? "true" : "false",
         mqtt.last_ack_us > 0 ? (now - mqtt.last_ack_us) / 1000 : -1,
-        mqtt.puback_count, mqtt.suback_count, mqtt.connect_count,
+        mqtt.puback_count,
+        mqtt.last_rx_us > 0 ? (now - mqtt.last_rx_us) / 1000 : -1,
+        mqtt.suback_count, mqtt.connect_count,
         mqtt.publish_failures, mqtt.outbox_bytes,
         mqtt.command_queue_drops, (unsigned)mqtt.pending_command_count,
         mqtt.command_dispatch_ready ? "true" : "false",
         mqtt.command_in_flight ? "true" : "false",
-        mqtt_dispatch_age_ms, mqtt.command_dispatch_stack_words,
+        mqtt_dispatch_age_ms, mqtt.command_dispatch_stack_bytes,
         wifi.degraded ? "true" : "false", wifi.disconnect_count,
         store.erased_on_boot ? "true" : "false",
         store.erase_observed ? "true" : "false",
@@ -610,15 +633,15 @@ static void publish_health_probe(void)
         coordinator.global_safety_latched ? "true" : "false",
         coordinator.stop_in_progress ? "true" : "false",
         (unsigned)state_publisher_stack_high_water_mark(),
-        (unsigned)motor_control_ramp_stack_words(),
-        (unsigned)coordinator.supervisor_stack_words,
+        (unsigned)motor_control_ramp_stack_bytes(),
+        (unsigned)coordinator.supervisor_stack_bytes,
         coordinator.ramp_liveness_fault ? "true" : "false",
         coordinator.scheduler_liveness_fault ? "true" : "false",
         coordinator.tach_liveness_fault ? "true" : "false",
         coordinator.tach_action_ready ? "true" : "false",
         coordinator.tach_action_pending ? "true" : "false",
         coordinator.tach_action_age_ms,
-        coordinator.tach_action_stack_words,
+        coordinator.tach_action_stack_bytes,
         coordinator.mqtt_command_overflow_fault ? "true" : "false",
         coordinator.mqtt_dispatch_liveness_fault ? "true" : "false",
         coordinator.stop_count, (int)coordinator.last_stop_result);

@@ -68,13 +68,16 @@ jobs:
       - name: Check tracked release inputs and generated files
         run: python scripts/check_tracked_generated.py
 
+      - name: Check release SDK and target alignment
+        run: python scripts/check_release_inputs.py
+
       - name: Run offline Python tests
         run: python -m pytest -m "not stress" -v
 
       - name: Validate HIL evidence template structure
         run: python scripts/validate_hil_evidence.py hil/evidence-manifest.template.json --allow-incomplete
 
-      - name: Run host controller-policy tests with sanitizers
+      - name: Run host policy and firmware lifecycle tests with sanitizers
         run: python scripts/run_host_policy_tests.py --sanitize
 
       - name: Build and run controller-policy fuzz target

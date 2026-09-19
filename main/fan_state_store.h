@@ -29,7 +29,7 @@ typedef struct {
     bool save_task_ready;
     bool erased_on_boot;
     bool erase_observed;
-    uint32_t save_task_stack_words;
+    uint32_t save_task_stack_bytes;
 } fan_state_store_health_t;
 
 /** Initialize the store after NVS and app_config are ready. */

@@ -873,7 +873,7 @@ safety_supervisor_health_t safety_supervisor_health_snapshot(void)
         snapshot.maintenance_inhibited = motor_health.maintenance_inhibited;
     }
     if (task) {
-        snapshot.stack_words =
+        snapshot.stack_bytes =
             (uint32_t)uxTaskGetStackHighWaterMark(task);
     }
 #ifdef CONFIG_TACH_FEEDBACK_ENABLED
@@ -890,7 +890,7 @@ safety_supervisor_health_t safety_supervisor_health_snapshot(void)
                     now > action_health.oldest_action_since_us
                 ? (now - action_health.oldest_action_since_us) / 1000
                 : 0;
-        snapshot.tach_action_stack_words = action_health.stack_words;
+        snapshot.tach_action_stack_bytes = action_health.stack_bytes;
     }
 #else
     (void)callbacks;
@@ -908,7 +908,7 @@ int64_t safety_supervisor_heartbeat_us(void)
     return heartbeat;
 }
 
-uint32_t safety_supervisor_stack_words(void)
+uint32_t safety_supervisor_stack_bytes(void)
 {
     portENTER_CRITICAL(&s_state_lock);
     TaskHandle_t task = s_supervisor_task;

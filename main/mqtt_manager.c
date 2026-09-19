@@ -93,6 +93,7 @@ static bool s_initial_publish_pending;
 static bool s_disconnect_requested;
 static bool s_subscription_setup_failed;
 static int64_t s_last_ack_us;
+static int64_t s_last_rx_us;
 static int64_t s_connected_since_us;
 static uint32_t s_puback_count;
 static uint32_t s_publish_failures;
@@ -444,7 +445,7 @@ static void mqtt_manager_handle_data_event(esp_mqtt_event_handle_t event)
     portENTER_CRITICAL(&s_lock);
     bool current_client = event->client == s_client && s_connected && s_ready;
     uint32_t current_generation = s_connection_generation;
-    if (current_client) s_last_ack_us = esp_timer_get_time();
+    if (current_client) s_last_rx_us = esp_timer_get_time();
     portEXIT_CRITICAL(&s_lock);
     if (!current_client) return;
 
@@ -1035,6 +1036,7 @@ mqtt_manager_health_t mqtt_manager_health_snapshot(void)
         .connected = s_connected,
         .ready = s_ready,
         .last_ack_us = s_last_ack_us,
+        .last_rx_us = s_last_rx_us,
         .connected_since_us = s_connected_since_us,
         .puback_count = s_puback_count,
         .publish_failures = s_publish_failures,
@@ -1046,7 +1048,7 @@ mqtt_manager_health_t mqtt_manager_health_snapshot(void)
         .command_dispatch_heartbeat_us =
             s_command_dispatch_heartbeat_us,
         .oldest_command_since_us = s_command_in_flight_since_us,
-        .command_dispatch_stack_words = 0,
+        .command_dispatch_stack_bytes = 0,
         .command_queue_drops = s_command_queue_drops,
         .stale_command_drops = s_stale_command_drops,
         .dispatch_allocation_failures = s_dispatch_allocation_failures,
@@ -1073,7 +1075,7 @@ mqtt_manager_health_t mqtt_manager_health_snapshot(void)
         snapshot.pending_command_count = uxQueueMessagesWaiting(dispatch_queue);
     }
     if (dispatch_task) {
-        snapshot.command_dispatch_stack_words =
+        snapshot.command_dispatch_stack_bytes =
             (uint32_t)uxTaskGetStackHighWaterMark(dispatch_task);
     }
     // Supervisor health sampling must not wait behind a networking operation.

@@ -1085,7 +1085,7 @@ bool motor_control_get_health_snapshot(motor_control_health_snapshot_t *out)
     snapshot.ramp_heartbeat_us = s_ramp_heartbeat_us;
     portEXIT_CRITICAL(&s_heartbeat_lock);
     if (ramp_task) {
-        snapshot.ramp_stack_words =
+        snapshot.ramp_stack_bytes =
             (uint32_t)uxTaskGetStackHighWaterMark(ramp_task);
     }
     *out = snapshot;
@@ -1149,7 +1149,7 @@ int64_t motor_control_ramp_heartbeat_us(void)
     return heartbeat;
 }
 
-uint32_t motor_control_ramp_stack_words(void)
+uint32_t motor_control_ramp_stack_bytes(void)
 {
     portENTER_CRITICAL(&s_motor_lock);
     TaskHandle_t task = s_ramp_task;

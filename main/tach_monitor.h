@@ -85,7 +85,7 @@ esp_err_t tach_monitor_get_snapshot(int local_fan,
 /** Last successful sampling-loop heartbeat, in esp_timer microseconds. */
 int64_t tach_monitor_get_heartbeat_us(void);
 
-/** Sampling-task stack high-water mark in FreeRTOS words, or zero if stopped. */
+/** Sampling-task stack high-water mark in bytes, or zero if stopped. */
 UBaseType_t tach_monitor_get_stack_high_water_mark(void);
 
 #ifdef __cplusplus

@@ -258,7 +258,7 @@ static esp_err_t save_to_nvs(void)
         .length = sizeof(schedule_state_blob_t),
         .topology_fingerprint = s_config.app_config->topology_fingerprint,
         .fan_index_start = s_config.app_config->fan_index_start,
-        .fan_count = s_config.app_config->fan_count,
+        .fan_count = (uint8_t)s_config.app_config->fan_count,
         .slot_count = CONFIG_SCHEDULE_SLOTS,
     };
 
@@ -340,10 +340,8 @@ static void save_task_main(void *arg)
     while (true) {
         uint32_t notifications = 0;
         xTaskNotifyWait(0, UINT32_MAX, &notifications, portMAX_DELAY);
-        bool async_satisfied = false;
         if (notifications & SAVE_NOTIFY_SYNC) {
             process_pending_sync_saves();
-            async_satisfied = true;
         }
         if (!(notifications & SAVE_NOTIFY_ASYNC)) continue;
 
@@ -355,17 +353,13 @@ static void save_task_main(void *arg)
             }
             if (notifications & SAVE_NOTIFY_SYNC) {
                 process_pending_sync_saves();
-                async_satisfied = true;
-            }
-            if ((notifications & SAVE_NOTIFY_ASYNC) &&
-                !(notifications & SAVE_NOTIFY_SYNC)) {
-                async_satisfied = false;
             }
             // Coalesce a burst of schedule edits into one flash transaction.
         }
 
-        // A synchronous snapshot satisfies every older asynchronous request.
-        if (async_satisfied) continue;
+        // Notification bits can outlive the synchronous generation they refer
+        // to and coalesce with a newer edit. Always snapshot after the debounce;
+        // observing a SYNC bit alone does not prove that edit was persisted.
         esp_err_t err = save_to_nvs();
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to persist schedules: %s",
@@ -665,6 +659,13 @@ esp_err_t scheduler_set_override(bool inhibited)
 
     int64_t now = esp_timer_get_time();
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    // A safety stop may latch after the early check but before all fan
+    // reservations are acquired. Validate again at the state-change boundary.
+    if (!inhibited && s_runtime_inhibit_latched) {
+        release_all_fans_locked();
+        xSemaphoreGive(s_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
     s_inhibited = inhibited;
     if (s_inhibited) {
         for (int fan = 0; fan < s_config.app_config->fan_count; ++fan) {
@@ -1032,11 +1033,11 @@ scheduler_health_snapshot_t scheduler_health_snapshot(void)
     snapshot.heartbeat_us = scheduler_get_heartbeat_us();
     xSemaphoreGive(mutex);
     if (scheduler_task) {
-        snapshot.scheduler_task_stack_words =
+        snapshot.scheduler_task_stack_bytes =
             uxTaskGetStackHighWaterMark(scheduler_task);
     }
     if (save_task) {
-        snapshot.save_task_stack_words = uxTaskGetStackHighWaterMark(save_task);
+        snapshot.save_task_stack_bytes = uxTaskGetStackHighWaterMark(save_task);
     }
     return snapshot;
 }

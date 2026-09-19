@@ -375,6 +375,7 @@ config MQTT_WATCHDOG_TIMEOUT_MS
 
 config OTA_ENABLED
     bool "Enable MQTT-triggered HTTPS OTA updates"
+    select ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT
     depends on BOOTLOADER_APP_ROLLBACK_ENABLE
     default n
     help

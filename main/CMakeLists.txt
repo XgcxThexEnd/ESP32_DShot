@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "app_config.c"
+        "command_executor.c"
         "command_router.c"
         "controller_policy.c"
         "dshot_protocol.c"
@@ -9,11 +10,14 @@ idf_component_register(
         "fan_state_store.c"
         "motor_control.c"
         "mqtt_manager.c"
+        "ota_download.c"
         "ota_manager.c"
+        "ota_transport.c"
         "scheduler.c"
         "safety_supervisor.c"
         "state_publisher.c"
         "tach_monitor.c"
+        "tach_actions.c"
         "wifi_manager.c"
     INCLUDE_DIRS
         "."
@@ -23,6 +27,7 @@ idf_component_register(
         esp_driver_pcnt
         esp_driver_rmt
         esp_event
+        esp_http_client
         esp_https_ota
         esp_netif
         esp_timer
@@ -30,4 +35,5 @@ idf_component_register(
         mbedtls
         mqtt
         nvs_flash
+        tcp_transport
 )

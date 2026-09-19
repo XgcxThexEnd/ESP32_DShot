@@ -46,7 +46,10 @@ typedef void (*mqtt_manager_message_callback_t)(
 typedef struct {
     bool connected;
     bool ready;
+    /** PUBACK/SUBACK proof (or initial startup grace baseline), never RX. */
     int64_t last_ack_us;
+    /** Last received command fragment, including rejected input; diagnostic only. */
+    int64_t last_rx_us;
     int64_t connected_since_us;
     uint32_t puback_count;
     uint32_t publish_failures;
@@ -59,7 +62,7 @@ typedef struct {
     int64_t command_dispatch_heartbeat_us;
     /** Oldest queued or in-flight command; zero when the dispatcher is idle. */
     int64_t oldest_command_since_us;
-    uint32_t command_dispatch_stack_words;
+    uint32_t command_dispatch_stack_bytes;
     /** Queue saturation events; each forces a fail-closed reconnect. */
     uint32_t command_queue_drops;
     /** Commands discarded during enqueue/dispatch because their session aged. */

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile and run platform-neutral firmware policy tests with strict diagnostics."""
+"""Compile and run firmware policy and lifecycle tests with strict diagnostics."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def find_compiler(explicit: str | None) -> str:
-    candidates = [explicit, os.getenv("CC"), "clang", "cc", "gcc"]
+    candidates = [explicit, os.getenv("CC"), "clang", "cc", "gcc", "cl"]
     for candidate in candidates:
         if candidate and shutil.which(candidate):
             return candidate
@@ -50,22 +50,56 @@ def main() -> int:
             ROOT / "main" / "command_router.c",
             ROOT / "tests" / "c" / "test_command_router.c",
         ],
+        "scheduler_test": [ROOT / "tests" / "c" / "test_scheduler.c"],
+        "tach_monitor_test": [ROOT / "tests" / "c" / "test_tach_monitor.c"],
+        "fan_state_store_test": [ROOT / "tests" / "c" / "test_fan_state_store.c"],
+        "state_publisher_test": [ROOT / "tests" / "c" / "test_state_publisher.c"],
+        "mqtt_manager_test": [
+            ROOT / "main" / "command_executor.c",
+            ROOT / "main" / "command_router.c",
+            ROOT / "main" / "controller_policy.c",
+            ROOT / "tests" / "c" / "test_mqtt_manager.c",
+        ],
+        "ota_download_test": [
+            ROOT / "main" / "controller_policy.c",
+            ROOT / "main" / "ota_download.c",
+            ROOT / "tests" / "c" / "test_ota_download.c",
+        ],
+        "ota_transport_test": [
+            ROOT / "main" / "ota_transport.c",
+            ROOT / "tests" / "c" / "test_ota_transport.c",
+        ],
     }
+    stub_directories = {
+        "scheduler_test": ROOT / "tests" / "c" / "scheduler_stubs",
+        "tach_monitor_test": ROOT / "tests" / "c" / "lifecycle_stubs",
+        "fan_state_store_test": ROOT / "tests" / "c" / "lifecycle_stubs",
+        "state_publisher_test": ROOT / "tests" / "c" / "lifecycle_stubs",
+        "mqtt_manager_test": ROOT / "tests" / "c" / "lifecycle_stubs",
+        "ota_download_test": ROOT / "tests" / "c" / "ota_stubs",
+        "ota_transport_test": ROOT / "tests" / "c" / "ota_transport_stubs",
+    }
+    is_msvc = Path(compiler).name.lower() in ("cl", "cl.exe")
     for name, sources in test_programs.items():
         executable = args.build_dir / (f"{name}.exe" if os.name == "nt" else name)
-        command = [
-            compiler,
-            "-std=c11",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-Wpedantic",
-            "-I",
-            str(ROOT / "main"),
-            *(str(source) for source in sources),
-            "-o",
-            str(executable),
-        ]
+        include_dirs = [ROOT / "main"]
+        if name in stub_directories:
+            include_dirs.insert(0, stub_directories[name])
+        if is_msvc:
+            command = [
+                compiler, "/nologo", "/std:c11", "/W4", "/WX",
+                *(f"/I{directory}" for directory in include_dirs),
+                *(str(source) for source in sources),
+                f"/Fe:{executable}",
+                f"/Fo:{args.build_dir.resolve()}{os.sep}",
+            ]
+        else:
+            command = [
+                compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wpedantic",
+                *(flag for directory in include_dirs for flag in ("-I", str(directory))),
+                *(str(source) for source in sources),
+                "-o", str(executable),
+            ]
         if args.sanitize:
             command[1:1] = [
                 "-fsanitize=address,undefined",

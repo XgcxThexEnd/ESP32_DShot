@@ -16,7 +16,6 @@
 #endif
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "esp_log.h"
@@ -27,7 +26,8 @@
 #include "nvs_flash.h"
 
 #include "app_config.h"
-#include "command_router.h"
+#include "command_executor.h"
+#include "tach_actions.h"
 #include "fan_state_store.h"
 #include "motor_control.h"
 #include "mqtt_manager.h"
@@ -72,21 +72,7 @@
 #endif
 
 static const app_config_t *s_app_config;
-static command_router_config_t s_command_router_config;
-#ifdef CONFIG_TACH_FEEDBACK_ENABLED
-static SemaphoreHandle_t s_tach_action_mutex;
-static TaskHandle_t s_tach_action_task;
-static portMUX_TYPE s_tach_pending_lock = portMUX_INITIALIZER_UNLOCKED;
-typedef struct {
-    bool pending;
-    int64_t queued_at_us;
-    tach_monitor_stall_event_t event;
-} pending_tach_action_t;
-static pending_tach_action_t s_pending_tach_actions[APP_CONFIG_MAX_FANS];
-static bool s_tach_action_ready;
-static int64_t s_tach_action_heartbeat_us;
-static int64_t s_tach_action_in_flight_since_us;
-#endif
+
 
 static const char *TAG = "greenhouse";
 
@@ -98,12 +84,7 @@ static void publish_states(void);
 #define MOTOR_BOOT_SETTLE_MS      1500    // let ESCs see idle frames before arming
 #define HEARTBEAT_PERIOD_MS       5000    // periodic retained state publish
 #define ROLLBACK_PERSIST_TIMEOUT_MS 3000  // bound zero-target NVS acknowledgement
-#define MQTT_COMMAND_COMMIT_WAIT_MS 1500  // bound session-fence contention
 #define MQTT_DISPATCH_HEALTH_MAX_AGE_MS 1000
-#define TACH_ACTION_TASK_STACK    6144
-#define TACH_ACTION_TASK_PRIORITY 7
-#define TACH_ACTION_HEARTBEAT_MS  250
-#define TACH_CLEAR_SERIALIZE_WAIT_MS 10000
 
 _Static_assert(
     STATE_PUBLISHER_STOP_REASON_CAPACITY >= SAFETY_SUPERVISOR_REASON_CAPACITY,
@@ -215,252 +196,6 @@ static void safety_notify_state_callback(void *context)
     publish_states();
 }
 
-#ifdef CONFIG_TACH_FEEDBACK_ENABLED
-static bool tach_read_motor_snapshot(
-    int local_fan, tach_monitor_motor_snapshot_t *out_snapshot,
-    void *context)
-{
-    (void)context;
-    if (!out_snapshot) return false;
-    motor_control_fan_snapshot_t motor;
-    if (!motor_control_get_fan_snapshot(local_fan, &motor)) return false;
-    *out_snapshot = (tach_monitor_motor_snapshot_t) {
-        .applied_pct = motor.applied_pct,
-        .nonzero_applied_since_us = motor.nonzero_applied_since_us,
-    };
-    return true;
-}
-
-static bool read_tach_action_health(
-    void *context, safety_supervisor_tach_action_health_t *out_health)
-{
-    (void)context;
-    if (!out_health) return false;
-
-    TaskHandle_t action_task;
-    int64_t oldest_action_since_us;
-    portENTER_CRITICAL(&s_tach_pending_lock);
-    *out_health = (safety_supervisor_tach_action_health_t) {
-        .ready = s_tach_action_ready,
-        .heartbeat_us = s_tach_action_heartbeat_us,
-        .oldest_action_since_us = s_tach_action_in_flight_since_us,
-    };
-    oldest_action_since_us = s_tach_action_in_flight_since_us;
-    for (int i = 0; i < APP_CONFIG_MAX_FANS; ++i) {
-        int64_t queued_at_us = s_pending_tach_actions[i].pending
-                                   ? s_pending_tach_actions[i].queued_at_us
-                                   : 0;
-        if (queued_at_us > 0 &&
-            (oldest_action_since_us == 0 ||
-             queued_at_us < oldest_action_since_us)) {
-            oldest_action_since_us = queued_at_us;
-        }
-    }
-    out_health->oldest_action_since_us = oldest_action_since_us;
-    action_task = s_tach_action_task;
-    portEXIT_CRITICAL(&s_tach_pending_lock);
-    if (action_task) {
-        out_health->stack_words =
-            (uint32_t)uxTaskGetStackHighWaterMark(action_task);
-    }
-    return true;
-}
-
-static void tach_action_mark_complete(void)
-{
-    portENTER_CRITICAL(&s_tach_pending_lock);
-    s_tach_action_in_flight_since_us = 0;
-    s_tach_action_heartbeat_us = esp_timer_get_time();
-    portEXIT_CRITICAL(&s_tach_pending_lock);
-}
-
-static const char *tach_fault_reason(tach_monitor_fault_cause_t cause)
-{
-    return cause == TACH_MONITOR_FAULT_SENSOR_INVALID
-               ? "tachometer feedback invalid"
-               : "tachometer stall";
-}
-
-static void tach_escalate_to_global_stop(const char *reason,
-                                         esp_err_t initiating_error)
-{
-    ESP_LOGE(TAG, "%s; escalating tach response to global stop: %s",
-             reason, esp_err_to_name(initiating_error));
-    esp_err_t stop_error = safety_supervisor_stop_all(reason, true, true);
-    if (stop_error != ESP_OK) {
-        ESP_LOGE(TAG, "Escalated tach safety transaction failed: %s",
-                 esp_err_to_name(stop_error));
-    }
-}
-
-static bool tach_event_is_current(const tach_monitor_stall_event_t *event)
-{
-    tach_monitor_snapshot_t snapshot;
-    return event &&
-           tach_monitor_get_snapshot(event->local_fan, &snapshot) == ESP_OK &&
-           snapshot.stall_alarm && snapshot.fault_cause == event->cause &&
-           snapshot.fault_generation == event->fault_generation;
-}
-
-static void tach_action_task(void *argument)
-{
-    (void)argument;
-    portENTER_CRITICAL(&s_tach_pending_lock);
-    s_tach_action_ready = true;
-    s_tach_action_heartbeat_us = esp_timer_get_time();
-    portEXIT_CRITICAL(&s_tach_pending_lock);
-
-    for (;;) {
-        uint32_t notified_fans = 0;
-        (void)xTaskNotifyWait(
-            0, UINT32_MAX, &notified_fans,
-            pdMS_TO_TICKS(TACH_ACTION_HEARTBEAT_MS));
-
-        for (int local_fan = 0; local_fan < APP_CONFIG_MAX_FANS;
-             ++local_fan) {
-            if ((notified_fans & (1UL << local_fan)) == 0) continue;
-
-            tach_monitor_stall_event_t event;
-            bool pending;
-            portENTER_CRITICAL(&s_tach_pending_lock);
-            pending = s_pending_tach_actions[local_fan].pending;
-            event = s_pending_tach_actions[local_fan].event;
-            s_pending_tach_actions[local_fan].pending = false;
-            if (pending) {
-                s_tach_action_in_flight_since_us =
-                    s_pending_tach_actions[local_fan].queued_at_us;
-            }
-            portEXIT_CRITICAL(&s_tach_pending_lock);
-            if (!pending) continue;
-
-            if (xSemaphoreTake(s_tach_action_mutex, portMAX_DELAY) != pdTRUE) {
-                tach_escalate_to_global_stop(
-                    "tach action serialization failed", ESP_ERR_TIMEOUT);
-                tach_action_mark_complete();
-                continue;
-            }
-
-            // CLEAR can overtake callback dispatch after the monitor publishes
-            // a fault. Revalidate the generation while serialized with CLEAR
-            // so that delayed work cannot re-latch an alarm already cleared by
-            // the operator.
-            if (!tach_event_is_current(&event)) {
-                xSemaphoreGive(s_tach_action_mutex);
-                tach_action_mark_complete();
-                continue;
-            }
-
-            if (event.action == TACH_MONITOR_STALL_STOP_ALL) {
-                esp_err_t err = safety_supervisor_stop_for_tach_all(
-                    tach_fault_reason(event.cause), true);
-                if (err != ESP_OK) {
-                    tach_escalate_to_global_stop(
-                        "tach stop-all transaction failed", err);
-                }
-            } else if (event.action == TACH_MONITOR_STALL_STOP_FAN) {
-                esp_err_t motor_error = motor_control_set_tach_inhibit(
-                    event.local_fan, true);
-                esp_err_t scheduler_error = ESP_OK;
-                esp_err_t persistence_error = ESP_OK;
-                if (motor_error == ESP_OK) {
-                    scheduler_error = scheduler_cancel_fan(event.local_fan);
-                }
-                if (motor_error == ESP_OK && scheduler_error == ESP_OK) {
-                    // A debounced save is not sufficient here: a reset shortly
-                    // after the stall must not restore the pre-fault target.
-                    persistence_error = fan_state_store_save_sync(
-                        pdMS_TO_TICKS(ROLLBACK_PERSIST_TIMEOUT_MS));
-                }
-                if (motor_error != ESP_OK || scheduler_error != ESP_OK ||
-                    persistence_error != ESP_OK) {
-                    esp_err_t first_error = motor_error != ESP_OK
-                                                ? motor_error
-                                                : scheduler_error != ESP_OK
-                                                      ? scheduler_error
-                                                      : persistence_error;
-                    tach_escalate_to_global_stop(
-                        "per-fan tach stop could not be committed",
-                        first_error);
-                } else {
-                    request_state_publish(event.local_fan, true);
-                }
-            } else {
-                request_state_publish(event.local_fan, true);
-            }
-            xSemaphoreGive(s_tach_action_mutex);
-            tach_action_mark_complete();
-        }
-        portENTER_CRITICAL(&s_tach_pending_lock);
-        s_tach_action_heartbeat_us = esp_timer_get_time();
-        portEXIT_CRITICAL(&s_tach_pending_lock);
-    }
-}
-
-static void tach_confirmed_stall(const tach_monitor_stall_event_t *event,
-                                 void *context)
-{
-    (void)context;
-    if (!event || event->local_fan < 0 ||
-        event->local_fan >= APP_CONFIG_MAX_FANS) {
-        return;
-    }
-
-    TaskHandle_t action_task = s_tach_action_task;
-    if (!action_task) {
-        // Start order makes this unreachable, but a missing dispatcher must
-        // fail closed rather than silently discarding a confirmed fault.
-        tach_escalate_to_global_stop(
-            "tach action dispatcher unavailable", ESP_ERR_INVALID_STATE);
-        return;
-    }
-
-    // Keep the PCNT sampling task bounded. A single pending slot per fan is
-    // lossless because a latched fault cannot emit another event until CLEAR;
-    // if CLEAR/new-fault races this copy, the newer generation wins.
-    portENTER_CRITICAL(&s_tach_pending_lock);
-    s_pending_tach_actions[event->local_fan].event = *event;
-    s_pending_tach_actions[event->local_fan].queued_at_us =
-        esp_timer_get_time();
-    s_pending_tach_actions[event->local_fan].pending = true;
-    portEXIT_CRITICAL(&s_tach_pending_lock);
-    (void)xTaskNotify(action_task, 1UL << event->local_fan, eSetBits);
-}
-#endif
-
-static esp_err_t tach_clear_transaction_begin(void)
-{
-#ifdef CONFIG_TACH_FEEDBACK_ENABLED
-    if (!s_tach_action_mutex) return ESP_ERR_INVALID_STATE;
-    return xSemaphoreTake(
-               s_tach_action_mutex,
-               pdMS_TO_TICKS(TACH_CLEAR_SERIALIZE_WAIT_MS)) == pdTRUE
-               ? ESP_OK
-               : ESP_ERR_TIMEOUT;
-#else
-    return ESP_ERR_NOT_SUPPORTED;
-#endif
-}
-
-static esp_err_t clear_tach_alarm_locked(int local_fan)
-{
-#ifdef CONFIG_TACH_FEEDBACK_ENABLED
-    esp_err_t tach_err = tach_monitor_clear_alarm(local_fan);
-    esp_err_t motor_err = tach_err == ESP_OK
-                              ? motor_control_set_tach_inhibit(local_fan, false)
-                              : tach_err;
-    return tach_err != ESP_OK ? tach_err : motor_err;
-#else
-    (void)local_fan;
-    return ESP_ERR_NOT_SUPPORTED;
-#endif
-}
-
-static void tach_clear_transaction_end(void)
-{
-#ifdef CONFIG_TACH_FEEDBACK_ENABLED
-    if (s_tach_action_mutex) xSemaphoreGive(s_tach_action_mutex);
-#endif
-}
 
 
 static bool interlock_enable_if_safe(void)
@@ -510,13 +245,13 @@ static void read_publisher_coordinator_health(
     out_snapshot->tach_action_ready = safety.tach_action_ready;
     out_snapshot->tach_action_pending = safety.tach_action_pending;
     out_snapshot->tach_action_age_ms = safety.tach_action_age_ms;
-    out_snapshot->tach_action_stack_words =
-        safety.tach_action_stack_words;
+    out_snapshot->tach_action_stack_bytes =
+        safety.tach_action_stack_bytes;
     out_snapshot->mqtt_command_overflow_fault =
         safety.mqtt_command_overflow_fault;
     out_snapshot->mqtt_dispatch_liveness_fault =
         safety.mqtt_dispatch_liveness_fault;
-    out_snapshot->supervisor_stack_words = safety.stack_words;
+    out_snapshot->supervisor_stack_bytes = safety.stack_bytes;
     out_snapshot->stop_count = safety.stop_count;
     out_snapshot->last_stop_result = safety.last_stop_result;
     (void)snprintf(out_snapshot->last_stop_reason,
@@ -525,40 +260,6 @@ static void read_publisher_coordinator_health(
 }
 
 
-
-static esp_err_t apply_manual_command(int local_fan, uint8_t target_pct,
-                                      scheduler_target_result_t *result)
-{
-    if (!result) return ESP_ERR_INVALID_ARG;
-#ifdef CONFIG_SCHEDULE_ENABLED
-    return scheduler_apply_manual_target(local_fan, target_pct, result);
-#else
-    motor_control_ack_t ack;
-    esp_err_t err = motor_control_request_manual(local_fan, target_pct, &ack);
-    *result = (scheduler_target_result_t) {
-        .accepted = err == ESP_OK && ack.accepted,
-        .manual_target_pct = target_pct,
-        .communication_inhibit_cleared = ack.communication_inhibit_cleared,
-        .accepted_command_count = ack.accepted_command_count,
-        .requested_pct = ack.requested_pct,
-        .applied_pct = ack.applied_pct,
-    };
-    return err;
-#endif
-}
-
-static void acknowledge_manual_command(
-    int local_fan, const scheduler_target_result_t *result)
-{
-    if (!result || !result->accepted) return;
-    if (result->communication_inhibit_cleared) {
-        ESP_LOGI(TAG,
-                 "Communication-loss latch cleared by fresh manual command");
-    }
-    (void)state_publisher_publish_manual_ack(
-        local_fan, result->accepted_command_count, result->requested_pct,
-        result->applied_pct);
-}
 
 #ifdef CONFIG_OTA_ENABLED
 static void ota_publish_status_callback(void *context, const char *status,
@@ -606,185 +307,6 @@ static void ota_abort_callback(void *context)
     }
 }
 #endif
-
-static void mqtt_on_message(void *context, const char *topic, const char *data,
-                            size_t len, bool retained,
-                            const mqtt_manager_command_session_t *session)
-{
-    (void)context;
-    if (!topic || !data || !session || len != strlen(data)) {
-        ESP_LOGW(TAG, "Rejected malformed MQTT command");
-        return;
-    }
-    if (retained) {
-        ESP_LOGW(TAG, "Rejected retained command on topic '%s'", topic);
-        return;
-    }
-#ifdef CONFIG_OTA_ENABLED
-    if (ota_manager_is_in_progress()) {
-        ESP_LOGW(TAG, "Ignored command while OTA is in progress");
-        return;
-    }
-#endif
-
-    command_router_command_t command;
-    command_router_result_t parse_result = command_router_parse(
-        &s_command_router_config, topic, strlen(topic), data, len, false,
-        &command);
-    if (parse_result == COMMAND_ROUTER_NO_MATCH) return;
-    if (parse_result != COMMAND_ROUTER_ACCEPTED) {
-        ESP_LOGW(TAG, "Rejected MQTT command (router result %d) on '%s'",
-                 (int)parse_result, topic);
-        return;
-    }
-    ESP_LOGI(TAG, "MQTT RX topic='%s' payload_len=%zu", topic, len);
-
-    switch (command.type) {
-    case COMMAND_ROUTER_COMMAND_MANUAL_ON:
-    case COMMAND_ROUTER_COMMAND_MANUAL_OFF:
-    case COMMAND_ROUTER_COMMAND_MANUAL_PERCENTAGE: {
-        uint8_t target = command.type == COMMAND_ROUTER_COMMAND_MANUAL_ON
-                             ? (uint8_t)s_app_config->min_spin_pct
-                             : command.type == COMMAND_ROUTER_COMMAND_MANUAL_OFF
-                                   ? 0
-                                   : command.value.percentage;
-        scheduler_target_result_t result = {0};
-        esp_err_t err = mqtt_manager_command_commit_begin(
-            session, pdMS_TO_TICKS(MQTT_COMMAND_COMMIT_WAIT_MS));
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Discarded fan%d command from a stale MQTT session",
-                     command.fan_index);
-            return;
-        }
-        err = safety_supervisor_output_command_begin(
-            pdMS_TO_TICKS(MQTT_COMMAND_COMMIT_WAIT_MS));
-        if (err == ESP_OK) {
-            err = apply_manual_command(command.fan_local_index, target,
-                                       &result);
-            if (err == ESP_OK && result.accepted) {
-                fan_state_store_request_save();
-                // Enabling the output is part of both the session-authorized
-                // mutation and the supervisor stop/output transaction.
-                (void)interlock_enable_if_safe();
-            }
-            safety_supervisor_output_command_end();
-        }
-        mqtt_manager_command_commit_end();
-        if (err != ESP_OK || !result.accepted) {
-            ESP_LOGE(TAG, "fan%d command rejected by latched safety policy",
-                     command.fan_index);
-            return;
-        }
-        acknowledge_manual_command(command.fan_local_index, &result);
-        request_state_publish(command.fan_local_index, true);
-        break;
-    }
-    case COMMAND_ROUTER_COMMAND_TACH_CLEAR: {
-        // The tach worker may legitimately hold its serialization mutex for a
-        // multi-second safety stop. Wait for it before taking the short MQTT
-        // generation fence, then revalidate immediately at the clear commit.
-        esp_err_t err = tach_clear_transaction_begin();
-        if (err == ESP_OK) {
-            err = mqtt_manager_command_commit_begin(
-                session, pdMS_TO_TICKS(MQTT_COMMAND_COMMIT_WAIT_MS));
-            if (err == ESP_OK) {
-                err = clear_tach_alarm_locked(command.fan_local_index);
-                mqtt_manager_command_commit_end();
-            }
-            tach_clear_transaction_end();
-        }
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "fan%d tach alarm clear failed", command.fan_index);
-            return;
-        }
-        request_state_publish(command.fan_local_index, true);
-        break;
-    }
-    case COMMAND_ROUTER_COMMAND_SCHEDULE_OVERRIDE: {
-        esp_err_t err = mqtt_manager_command_commit_begin(
-            session, pdMS_TO_TICKS(MQTT_COMMAND_COMMIT_WAIT_MS));
-        if (err == ESP_OK) {
-            err = scheduler_set_override(
-                command.value.schedule_override.inhibited);
-            mqtt_manager_command_commit_end();
-        }
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Schedule override update failed");
-        }
-        break;
-    }
-    case COMMAND_ROUTER_COMMAND_SCHEDULE_SET: {
-        esp_err_t err = mqtt_manager_command_commit_begin(
-            session, pdMS_TO_TICKS(MQTT_COMMAND_COMMIT_WAIT_MS));
-        if (err == ESP_OK) {
-            err = scheduler_set_entry(
-                command.fan_local_index, (int)command.schedule_slot,
-                command.value.schedule_set.interval_min,
-                command.value.schedule_set.duration_min,
-                command.value.schedule_set.target_pct);
-            mqtt_manager_command_commit_end();
-        }
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Schedule update failed for fan%d slot%u",
-                     command.fan_index, command.schedule_slot);
-        }
-        break;
-    }
-    case COMMAND_ROUTER_COMMAND_SCHEDULE_DISABLE: {
-        esp_err_t err = mqtt_manager_command_commit_begin(
-            session, pdMS_TO_TICKS(MQTT_COMMAND_COMMIT_WAIT_MS));
-        if (err == ESP_OK) {
-            err = scheduler_disable_entry(command.fan_local_index,
-                                          (int)command.schedule_slot);
-            mqtt_manager_command_commit_end();
-        }
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Schedule disable failed for fan%d slot%u",
-                     command.fan_index, command.schedule_slot);
-        }
-        break;
-    }
-    case COMMAND_ROUTER_COMMAND_SCHEDULE_GET: {
-        scheduler_entry_snapshot_t snapshot;
-        if (scheduler_get_entry(command.fan_local_index,
-                                (int)command.schedule_slot,
-                                &snapshot) != ESP_OK) {
-            ESP_LOGW(TAG, "Schedule read failed for fan%d slot%u",
-                     command.fan_index, command.schedule_slot);
-            break;
-        }
-        (void)state_publisher_publish_schedule_entry(
-            command.fan_local_index, command.schedule_slot, &snapshot);
-        break;
-    }
-    case COMMAND_ROUTER_COMMAND_OTA_UPDATE: {
-        esp_err_t fence_error = mqtt_manager_command_commit_begin(
-            session, pdMS_TO_TICKS(MQTT_COMMAND_COMMIT_WAIT_MS));
-        if (fence_error != ESP_OK) {
-            ESP_LOGW(TAG, "Discarded OTA command from a stale MQTT session");
-            break;
-        }
-        ota_manager_start_result_t claim_result =
-            ota_manager_start(command.value.ota_update.url);
-        mqtt_manager_command_commit_end();
-
-        // Safety/NVS work, status publishing, and task creation may block, so
-        // only the singleton claim above belongs under the session fence.
-        ota_manager_start_result_t start_result =
-            ota_manager_complete_start(claim_result);
-        if (start_result != OTA_MANAGER_START_ACCEPTED) {
-            ESP_LOGW(TAG, "OTA command rejected or could not be started (%d)",
-                     (int)start_result);
-        }
-        break;
-    }
-    case COMMAND_ROUTER_COMMAND_NONE:
-    default:
-        break;
-    }
-}
-
-
 
 static bool network_config_valid(void)
 {
@@ -886,7 +408,7 @@ static bool pending_image_local_health_window_passed(void)
 #endif
 #ifdef CONFIG_TACH_FEEDBACK_ENABLED
             tach_mid = tach_monitor_get_heartbeat_us();
-            (void)read_tach_action_health(NULL, &tach_action_mid);
+            (void)tach_actions_read_health(NULL, &tach_action_mid);
 #endif
             midpoint_taken = true;
         }
@@ -906,7 +428,7 @@ static bool pending_image_local_health_window_passed(void)
 #ifdef CONFIG_TACH_FEEDBACK_ENABLED
     int64_t tach_end = tach_monitor_get_heartbeat_us();
     safety_supervisor_tach_action_health_t tach_action_end = {0};
-    (void)read_tach_action_health(NULL, &tach_action_end);
+    (void)tach_actions_read_health(NULL, &tach_action_end);
 #endif
     bool auxiliary_tasks_ready = state_publisher_is_ready() &&
         mqtt_dispatch_end.command_dispatch_ready;
@@ -1053,28 +575,13 @@ void app_main(void)
         startup_failure_safe("configuration ownership initialization failed");
         return;
     }
-    s_command_router_config = (command_router_config_t) {
-        .node_base_prefix = s_app_config->node_topic,
-        .legacy_base_prefix = s_app_config->mqtt_root_topic,
-        .fan_index_start = s_app_config->fan_index_start,
-        .fan_count = s_app_config->fan_count,
-#ifdef CONFIG_SCHEDULE_ENABLED
-        .schedule_slot_count = CONFIG_SCHEDULE_SLOTS,
-        .schedule_enabled = true,
-#endif
-#ifdef CONFIG_TACH_FEEDBACK_ENABLED
-        .tach_enabled = true,
-#endif
-#ifdef CONFIG_OTA_ENABLED
-        .ota_enabled = true,
-        .ota_allowed_url_prefix = CONFIG_OTA_ALLOWED_URL_PREFIX,
-#endif
-#ifdef CONFIG_MQTT_LEGACY_TOPICS
-        .legacy_enabled = true,
-#endif
-    };
+    ret = command_executor_init(s_app_config);
+    if (ret != ESP_OK) {
+        startup_failure_safe("command executor initialization failed");
+        return;
+    }
 
-    ret = mqtt_manager_init(mqtt_on_message, NULL);
+    ret = mqtt_manager_init(command_executor_on_message, NULL);
     if (ret != ESP_OK) {
         startup_failure_safe("MQTT manager initialization failed");
         return;
@@ -1098,7 +605,7 @@ void app_main(void)
         .request_persistence = safety_request_persistence_callback,
         .notify_state = safety_notify_state_callback,
 #ifdef CONFIG_TACH_FEEDBACK_ENABLED
-        .read_tach_action_health = read_tach_action_health,
+        .read_tach_action_health = tach_actions_read_health,
 #endif
     };
     ret = safety_supervisor_configure(&safety_callbacks);
@@ -1168,15 +675,15 @@ void app_main(void)
         return;
     }
 #ifdef CONFIG_TACH_FEEDBACK_ENABLED
-    s_tach_action_mutex = xSemaphoreCreateMutex();
-    if (!s_tach_action_mutex) {
+    ret = tach_actions_init();
+    if (ret != ESP_OK) {
         startup_failure_safe("tachometer action mutex allocation failed");
         return;
     }
     const tach_monitor_config_t tach_config = {
         .app_config = s_app_config,
-        .read_motor_snapshot = tach_read_motor_snapshot,
-        .confirmed_stall = tach_confirmed_stall,
+        .read_motor_snapshot = tach_actions_read_motor_snapshot,
+        .confirmed_stall = tach_actions_confirmed_stall,
     };
     ret = tach_monitor_init(&tach_config);
     if (ret != ESP_OK) {
@@ -1185,10 +692,8 @@ void app_main(void)
         startup_failure_safe("tachometer initialization failed");
         return;
     }
-    if (xTaskCreate(tach_action_task, "tach_action",
-                    TACH_ACTION_TASK_STACK, NULL,
-                    TACH_ACTION_TASK_PRIORITY,
-                    &s_tach_action_task) != pdPASS) {
+    ret = tach_actions_start();
+    if (ret != ESP_OK) {
         startup_failure_safe("tachometer action task creation failed");
         return;
     }
@@ -1367,4 +872,3 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_PERIOD_MS));
     }
 }
-

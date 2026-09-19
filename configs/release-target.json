@@ -1,0 +1,6 @@
+{
+  "esp_idf_version": "6.1.0",
+  "target": "esp32s3",
+  "lock_schema": "3.0.0",
+  "builder_image": "espressif/idf:release-v6.1@sha256:7c7663959a3d6c46ee6bc8a1a532aac02ecdf2b287a88e368434eac66ce2d9c4"
+}

@@ -1,0 +1,12 @@
+config OTA_ENABLED
+    bool
+    default y
+
+menu "OTA transport bench"
+config OTA_TEST_BASE_URL
+    string "TLS fixture URL (without trailing slash)"
+    default "https://ota-test.invalid:8443"
+config OTA_TEST_REJECT_CERT
+    bool "Expect certificate verification failure"
+    default n
+endmenu
